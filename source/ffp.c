@@ -1387,7 +1387,7 @@ void _glDrawArrays_FixedFunctionIMPL(GLint first, GLsizei count) {
 			void *ptr;
 			if (ffp_vertex_attrib_vbo[id]) {
 				vbo *gpu_buf = (vbo *)ffp_vertex_attrib_vbo[id];
-				gpu_buf->last_frame = vgl_framecount;
+				gpu_buf->last_frame = gpu_buf->gpu_frame = vgl_framecount;
 				ptr = (uint8_t *)gpu_buf->ptr + ffp_vertex_attrib_offsets[id] + first * ffp_vertex_stream_config[id].stride;
 			} else {
 				if (ffp_lighting_streams && FFP_ATTRIB_IS_LIGHT(id)) {
@@ -1402,7 +1402,7 @@ void _glDrawArrays_FixedFunctionIMPL(GLint first, GLsizei count) {
 					} else { // Color array mapped to this attribute (FIXME: This could be optimized by re-using color temp mem)
 						if (id != FFP_ATTRIB_NORMAL && ffp_vertex_attrib_vbo[FFP_ATTRIB_COLOR]) {
 							vbo *gpu_buf = (vbo *)ffp_vertex_attrib_vbo[FFP_ATTRIB_COLOR];
-							gpu_buf->last_frame = vgl_framecount;
+							gpu_buf->last_frame = gpu_buf->gpu_frame = vgl_framecount;
 							ptr = (uint8_t *)gpu_buf->ptr + ffp_vertex_attrib_offsets[FFP_ATTRIB_COLOR] + first * ffp_vertex_stream_config[FFP_ATTRIB_COLOR].stride;
 						} else {
 #ifdef DRAW_SPEEDHACK
@@ -1529,7 +1529,7 @@ void _glMultiDrawArrays_FixedFunctionIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
 			}
 			if (ffp_vertex_attrib_vbo[id]) {
 				vbo *gpu_buf = (vbo *)ffp_vertex_attrib_vbo[id];
-				gpu_buf->last_frame = vgl_framecount;
+				gpu_buf->last_frame = gpu_buf->gpu_frame = vgl_framecount;
 				ptrs[j] = (uint8_t *)gpu_buf->ptr + ffp_vertex_attrib_offsets[i] + lowest * ffp_vertex_stream_config[id].stride;
 				strides[j] = ffp_vertex_stream_config[id].stride;
 			} else {
@@ -1546,7 +1546,7 @@ void _glMultiDrawArrays_FixedFunctionIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
 					} else { // Color array mapped to this attribute (FIXME: This could be optimized by re-using color temp mem)
 						if (id != FFP_ATTRIB_NORMAL && ffp_vertex_attrib_vbo[FFP_ATTRIB_COLOR]) {
 							vbo *gpu_buf = (vbo *)ffp_vertex_attrib_vbo[FFP_ATTRIB_COLOR];
-							gpu_buf->last_frame = vgl_framecount;
+							gpu_buf->last_frame = gpu_buf->gpu_frame = vgl_framecount;
 							ptrs[j] = (uint8_t *)gpu_buf->ptr + ffp_vertex_attrib_offsets[FFP_ATTRIB_COLOR] + lowest * ffp_vertex_stream_config[FFP_ATTRIB_COLOR].stride;
 							strides[j] = ffp_vertex_stream_config[FFP_ATTRIB_COLOR].stride;
 						} else {
@@ -1723,7 +1723,7 @@ void _glDrawElements_FixedFunctionIMPL(uint16_t *idx_buf, GLsizei count, uint32_
 		int attr_idx = attr_idxs[i];
 		if (ffp_vertex_attrib_vbo[attr_idx]) {
 			vbo *gpu_buf = (vbo *)ffp_vertex_attrib_vbo[attr_idx];
-			gpu_buf->last_frame = vgl_framecount;
+			gpu_buf->last_frame = gpu_buf->gpu_frame = vgl_framecount;
 			ptr = (uint8_t *)gpu_buf->ptr + ffp_vertex_attrib_offsets[attr_idx];
 		} else {
 			if (ffp_lighting_streams && FFP_ATTRIB_IS_LIGHT(attr_idx)) {
@@ -1738,7 +1738,7 @@ void _glDrawElements_FixedFunctionIMPL(uint16_t *idx_buf, GLsizei count, uint32_
 				} else { // Color array mapped to this attribute (FIXME: This could be optimized by re-using color temp mem)
 					if (attr_idx != FFP_ATTRIB_NORMAL && ffp_vertex_attrib_vbo[FFP_ATTRIB_COLOR]) {
 						vbo *gpu_buf = (vbo *)ffp_vertex_attrib_vbo[FFP_ATTRIB_COLOR];
-						gpu_buf->last_frame = vgl_framecount;
+						gpu_buf->last_frame = gpu_buf->gpu_frame = vgl_framecount;
 						ptr = (uint8_t *)gpu_buf->ptr + ffp_vertex_attrib_offsets[FFP_ATTRIB_COLOR];
 					} else {
 #ifdef DRAW_SPEEDHACK

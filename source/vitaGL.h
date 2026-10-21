@@ -1184,6 +1184,10 @@ void *vglGetProcAddress(const char *name);
 
 // Get the internal texture data pointer of a GL texture.
 void *vglGetTexDataPointer(GLenum target);
+void vglGetShaderPatcherUsage(uint32_t *buffer_used, uint32_t *vertex_usse_used, uint32_t *fragment_usse_used, uint32_t *pool_size); // HL2 port memory log
+void vglGetBufferChurn(uint32_t *orphans, uint32_t *orphan_kb, uint32_t *reuses, uint32_t *spare_kb, uint32_t *copies, uint32_t *copy_kb); // HL2 port: buffers replaced while in use, spares reused and held
+void vglGetBufferEarlyFrees(uint32_t *count); // HL2 port: buffers replaced right after an unmap while the GPU could still read them
+void vglTexInPlaceUpdates(GLenum target, GLboolean enable); // sub-image updates of the bound texture skip the copy-on-write (lightmaps)
 
 // Get the internal texture palette data pointer of a GL texture.
 void *vglGetTexPaletteDataPointer(GLenum target);
@@ -1217,6 +1221,10 @@ size_t vglMemFree(vglMemType type);
 
 // Gets the total amount of free and used memory in a given internal memory pool.
 size_t vglMemTotal(vglMemType type);
+
+// Gets the amount of newlib heap memory vitaGL currently holds (its own objects and
+// GPU data that spilled out of its internal mempools).
+size_t vglMemExternalInUse(void);
 
 // Replaces original texture data pointer with a new one in a GL texture.
 void vglOverloadTexDataPointer(GLenum target, void *data);

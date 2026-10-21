@@ -150,6 +150,9 @@ void gpu_alloc_paletted_texture(int32_t level, uint32_t w, uint32_t h, SceGxmTex
 // Alloc a planar texture
 void gpu_alloc_planar_texture(uint32_t w, uint32_t h, SceGxmTextureFormat format, const void *data, texture *tex);
 
+// HL2 port: texture uploads' transfers may still be in flight (gpu_utils.c)
+extern GLboolean vgl_transfers_pending;
+
 // Dealloc a texture data
 static inline __attribute__((always_inline)) void gpu_free_texture_data(texture *tex) {
 	// Deallocating texture
@@ -181,6 +184,11 @@ static inline __attribute__((always_inline)) void gpu_free_texture_data(texture 
 #endif
 #ifndef TEXTURES_SPEEDHACK
 		if (vgl_framecount - tex->last_frame > FRAME_PURGE_FREQ) {
+			// an upload may still be writing into it (HL2 port, gpu_utils.c)
+			if (vgl_transfers_pending) {
+				sceGxmTransferFinish();
+				vgl_transfers_pending = GL_FALSE;
+			}
 			vgl_free(tex->data);
 		} else
 #endif

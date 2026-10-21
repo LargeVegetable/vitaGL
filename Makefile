@@ -148,6 +148,11 @@ ifeq ($(LOG_ERRORS),1)
 CFLAGS += -DLOG_ERRORS
 endif
 
+# HL2 Vita debugging: guard bytes after heap blocks, checked after uploads
+ifeq ($(HEAP_CANARIES),1)
+CFLAGS += -DVGL_HEAP_CANARIES
+endif
+
 ifeq ($(HAVE_PROFILING),1)
 CFLAGS += -DHAVE_PROFILING
 endif

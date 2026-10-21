@@ -34,6 +34,18 @@
 #define STB_DXT_IMPLEMENTATION
 #include "stb_dxt.h"
 
+// HL2 port: texture uploads' sceGxmTransferCopy/Downscale jobs run on the
+// GPU's transfer engine after the call returns. gpu_free_texture_data
+// (gpu_utils.h) frees a texture's memory right away when it wasn't drawn in
+// the last frames, which a just-uploaded texture never was: a map load could
+// free one while its upload was still writing into it, which corrupted the
+// allocator (crash in sceClibMspaceRealloc). The free now waits for
+// pending transfers; this records that there are any
+GLboolean vgl_transfers_pending = GL_FALSE;
+#define sceGxmTransferCopy(...) ( vgl_transfers_pending = GL_TRUE, sceGxmTransferCopy( __VA_ARGS__ ) )
+#define sceGxmTransferDownscale(...) ( vgl_transfers_pending = GL_TRUE, sceGxmTransferDownscale( __VA_ARGS__ ) )
+#define sceGxmTransferFinish() ( vgl_transfers_pending = GL_FALSE, sceGxmTransferFinish() )
+
 #ifdef HAVE_TEX_CACHE
 uint32_t vgl_tex_cache_freq = 3600; // Number of frames prior a texture becomes cacheable if not used
 #endif
@@ -369,7 +381,11 @@ void gpu_alloc_cube_texture(uint32_t w, uint32_t h, SceGxmTextureFormat format, 
 			vgl_memset(texture_data, 0, face_size);
 
 		// Initializing texture and validating it
-		tex->mip_count = 0;
+		// One level: only level 0 of each face is stored. The init and
+		// vglSetTexMipmapCount write (count - 1) & 0xF, so 0 meant 16 levels
+		// and sampling at a distance read past the faces (rainbow/noise
+		// reflections in the HL2 port)
+		tex->mip_count = 1;
 		vglInitCubeTexture(&tex->gxm_tex, base_texture_data, format, w, h, tex->mip_count);
 		tex->palette_data = NULL;
 		tex->status = TEX_VALID;
@@ -593,7 +609,7 @@ void gpu_alloc_compressed_cube_texture(uint32_t w, uint32_t h, SceGxmTextureForm
 				case SCE_GXM_TEXTURE_FORMAT_UBC2_ABGR:
 				case SCE_GXM_TEXTURE_FORMAT_UBC3_ABGR:
 				case SCE_GXM_TEXTURE_FORMAT_UBC5_GR:
-					if (aligned_width == w && aligned_height == h && h <= 2048 && w <= 2048) {
+					if (aligned_width == w && aligned_height == h && h <= 2048 && w <= 2048 && w >= 4 && h >= 4) {
 #ifdef TEXTURE_UPLOADS_SPEEDHACK
 						void *mapped_src = data;
 #else
@@ -611,7 +627,7 @@ void gpu_alloc_compressed_cube_texture(uint32_t w, uint32_t h, SceGxmTextureForm
 					SwizzleTexDataETC1((uint8_t *)mip_data, (uint8_t *)data, 0, 0, ALIGNBLOCK(w, 4), ALIGNBLOCK(h, 4), ALIGNBLOCK(w, 4), ALIGNBLOCK(MIN(aligned_width, aligned_height), 4));
 					break;
 				case SCE_GXM_TEXTURE_FORMAT_PVRTII2BPP_ABGR:
-					if (aligned_width == w && aligned_height == h && h <= 2048) {
+					if (aligned_width == w && aligned_height == h && h <= 2048 && w >= 8 && h >= 4) {
 #ifdef TEXTURE_UPLOADS_SPEEDHACK
 						void *mapped_src = data;
 #else
@@ -626,7 +642,7 @@ void gpu_alloc_compressed_cube_texture(uint32_t w, uint32_t h, SceGxmTextureForm
 					}
 					break;
 				default:
-					if (aligned_width == w && aligned_height == h && h <= 2048) {
+					if (aligned_width == w && aligned_height == h && h <= 2048 && w >= 4 && h >= 4) {
 #ifdef TEXTURE_UPLOADS_SPEEDHACK
 						void *mapped_src = data;
 #else
@@ -646,7 +662,11 @@ void gpu_alloc_compressed_cube_texture(uint32_t w, uint32_t h, SceGxmTextureForm
 			vgl_memset(mip_data, 0, mip_size);
 
 		// Initializing texture and validating it
-		tex->mip_count = 0;
+		// One level: only level 0 of each face is stored. The init and
+		// vglSetTexMipmapCount write (count - 1) & 0xF, so 0 meant 16 levels
+		// and sampling at a distance read past the faces (rainbow/noise
+		// reflections in the HL2 port)
+		tex->mip_count = 1;
 		vglInitCubeTexture(&tex->gxm_tex, base_texture_data, format, w, h, tex->mip_count);
 		tex->palette_data = NULL;
 		tex->status = TEX_VALID;
@@ -698,6 +718,11 @@ void gpu_alloc_compressed_texture(int32_t mip_level, uint32_t w, uint32_t h, Sce
 		if (mip_count >= mip_level)
 			texture_data = tex->data;
 		else {
+			// The previous levels' uploads may still be in flight as
+			// sceGxmTransferCopy jobs writing into tex->data; realloc frees it
+			// right away, and a transfer landing in freed heap memory corrupts
+			// the allocator (seen as crashes in later allocations)
+			sceGxmTransferFinish();
 			texture_data = vgl_realloc(tex->data, tex_size);
 			if (!texture_data) {
 				// Reallocation in the same mspace failed, try manually.
@@ -737,7 +762,17 @@ void gpu_alloc_compressed_texture(int32_t mip_level, uint32_t w, uint32_t h, Sce
 				case SCE_GXM_TEXTURE_FORMAT_UBC2_ABGR:
 				case SCE_GXM_TEXTURE_FORMAT_UBC3_ABGR:
 				case SCE_GXM_TEXTURE_FORMAT_UBC5_GR:
-					if (aligned_width == w && aligned_height == h && h <= 2048 && w <= 2048) {
+					// Mips under 4 pixels wide or high are less than one block per side: the
+					// transfer below would copy w/4 x h/4 = 0 blocks and leave the level as
+					// uninitialized memory, so those go through the swizzler, which rounds up.
+					// HL2 port: 128-bit blocks (DXT3/DXT5) always take the CPU swizzler. Through
+					// the RAW128 sceGxmTransferCopy, DXT5 textures came out black or with
+					// garbage blocks (different each run) while DXT1 (RAW64) was fine
+#ifdef HL2_DXT5_TRANSFER
+					if (aligned_width == w && aligned_height == h && h <= 2048 && w <= 2048 && w >= 4 && h >= 4) {
+#else
+					if (0) {
+#endif
 #ifdef TEXTURE_UPLOADS_SPEEDHACK
 						void *mapped_src = data;
 #else
@@ -755,7 +790,7 @@ void gpu_alloc_compressed_texture(int32_t mip_level, uint32_t w, uint32_t h, Sce
 					SwizzleTexDataETC1((uint8_t *)mip_data, (uint8_t *)data, 0, 0, ALIGNBLOCK(w, 4), ALIGNBLOCK(h, 4), ALIGNBLOCK(w, 4), ALIGNBLOCK(MIN(aligned_width, aligned_height), 4));
 					break;
 				case SCE_GXM_TEXTURE_FORMAT_PVRTII2BPP_ABGR:
-					if (aligned_width == w && aligned_height == h && h <= 2048) {
+					if (aligned_width == w && aligned_height == h && h <= 2048 && w >= 8 && h >= 4) {
 #ifdef TEXTURE_UPLOADS_SPEEDHACK
 						void *mapped_src = data;
 #else
@@ -770,7 +805,7 @@ void gpu_alloc_compressed_texture(int32_t mip_level, uint32_t w, uint32_t h, Sce
 					}
 					break;
 				default:
-					if (aligned_width == w && aligned_height == h && h <= 2048) {
+					if (aligned_width == w && aligned_height == h && h <= 2048 && w >= 4 && h >= 4) {
 #ifdef TEXTURE_UPLOADS_SPEEDHACK
 						void *mapped_src = data;
 #else
@@ -850,7 +885,10 @@ void gpu_alloc_mipmaps(int level, texture *tex) {
 		// Calculating needed sceGxmTransfer format for the downscale process
 		SceGxmTransferFormat fmt = tex_format_to_transfer(format);
 
-		// Reallocating texture with full mipchain size
+		// Reallocating texture with full mipchain size; pending transfers into
+		// the old buffer have to land first (see gpu_alloc_compressed_texture)
+		if (count <= 0)
+			sceGxmTransferFinish();
 		void *texture_data = count <= 0 ? vgl_realloc(tex->data, size) : tex->data;
 		if (count <= 0 && !texture_data) {
 			// Reallocation in the same mspace failed, try manually.

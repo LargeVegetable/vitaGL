@@ -105,6 +105,10 @@ void glGenQueries(GLsizei n, GLuint *ids) {
 		return;
 	}
 #endif
+	// Ids that can't be given out (all MAX_QUERIES_NUM in use) are 0, which
+	// the query functions ignore, instead of left uninitialized
+	for (GLsizei i = 0; i < n; i++)
+		ids[i] = 0;
 	for (GLuint i = 0; i < MAX_QUERIES_NUM; i++) {
 		if (queries[i].id == 0xFF) {
 			ids[n - 1] = (GLuint)&queries[i];
@@ -147,6 +151,9 @@ void glBeginQuery(GLenum target, GLuint id) {
 	default:
 		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, target)
 	}
+	if (!id) {
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	}
 	active_query = (query *)id;
 	queries_buffer[active_query->id] = 0;
 	queries_buffer[active_query->id + MAX_QUERIES_NUM] = 0;
@@ -162,6 +169,10 @@ void glBeginQuery(GLenum target, GLuint id) {
 void glEndQuery(GLenum target) {
 	THREAD_SAFE()
 
+	if (!active_query) {
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	}
+
 	sceGxmSetFrontVisibilityTestEnable(gxm_context, SCE_GXM_VISIBILITY_TEST_DISABLED);
 	sceGxmSetBackVisibilityTestEnable(gxm_context, SCE_GXM_VISIBILITY_TEST_DISABLED);
 	active_query->sync = query_fence.value + 1;
@@ -171,6 +182,10 @@ void glEndQuery(GLenum target) {
 void glGetQueryObjectiv(GLuint id, GLenum pname, GLint *params) {
 	THREAD_SAFE()
 
+	if (!id) { // a query that couldn't be allocated: report done and passed
+		*params = 1;
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	}
 	query *q = (query *)id;
 
 	switch (pname) {
@@ -207,6 +222,10 @@ void glGetQueryObjectiv(GLuint id, GLenum pname, GLint *params) {
 void glGetQueryObjectuiv(GLuint id, GLenum pname, GLuint *params) {
 	THREAD_SAFE()
 
+	if (!id) { // a query that couldn't be allocated: report done and passed
+		*params = 1;
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	}
 	query *q = (query *)id;
 
 	switch (pname) {
@@ -300,6 +319,8 @@ inline __attribute__((always_inline)) void glGenBuffers(GLsizei n, GLuint *res) 
 #endif
 		gpu_buf->ptr = NULL;
 		gpu_buf->last_frame = OBJ_NOT_USED;
+		gpu_buf->gpu_frame = OBJ_NOT_USED;
+		gpu_buf->spare_count = 0;
 		res[i] = (GLuint)gpu_buf;
 	}
 }
@@ -326,8 +347,21 @@ void glBindBuffer(GLenum target, GLuint buffer) {
 	}
 }
 
+static void vbo_drop_spares(vbo *gpu_buf);
+
+// HL2 port: a draw used the buffer in the last FRAME_PURGE_FREQ frames, so
+// the GPU may still read its memory
+static inline GLboolean vbo_gpu_may_read(const vbo *gpu_buf) {
+	return gpu_buf->gpu_frame != OBJ_NOT_USED && (vgl_framecount - gpu_buf->gpu_frame <= FRAME_PURGE_FREQ);
+}
+static uint32_t vgl_buffer_early_frees;	// frees the old last_frame test would have done at once
+void vglGetBufferEarlyFrees(uint32_t *count) {
+	*count = vgl_buffer_early_frees;
+}
+
 void glDeleteBuffers(GLsizei n, const GLuint *gl_buffers) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glDeleteBuffers", 0, n, gl_buffers ? gl_buffers[0] : 0, 0, 0, 0, 0);
 
 #ifndef SKIP_ERROR_HANDLING
 	if (n < 0) {
@@ -342,15 +376,94 @@ void glDeleteBuffers(GLsizei n, const GLuint *gl_buffers) {
 #else
 			if (gpu_buf->ptr) {
 #endif
-				if (gpu_buf->last_frame != OBJ_NOT_USED && (vgl_framecount - gpu_buf->last_frame <= FRAME_PURGE_FREQ)) {
+				if (vbo_gpu_may_read(gpu_buf)) {
 					mark_as_dirty(gpu_buf->ptr);
 				} else {
 					vgl_free(gpu_buf->ptr);
 				}
 			}
+			vbo_drop_spares(gpu_buf);
 			vgl_free(gpu_buf);
 		}
 	}
+}
+
+// HL2 port: buffer memory replaced while the GPU may still read the old one
+// (an orphan by glBufferData, a copy by glBufferSubData), counted for the
+// memory log (vglGetBufferChurn). VRAM once ran out in a busy canal fight
+// with textures flat; the log then showed ToGL replacing its dynamic vertex
+// and index buffers every frame (~1.6 MB a frame), each held 4 frames by the
+// garbage collector. Orphans are now kept as the buffer's spares (shared.h)
+static uint32_t vgl_buffer_orphans, vgl_buffer_orphan_kb, vgl_buffer_copies, vgl_buffer_copy_kb;
+static uint32_t vgl_buffer_reuses, vgl_buffer_spare_kb;
+void vglGetBufferChurn(uint32_t *orphans, uint32_t *orphan_kb, uint32_t *reuses, uint32_t *spare_kb, uint32_t *copies, uint32_t *copy_kb) {
+	*orphans = vgl_buffer_orphans;
+	*orphan_kb = vgl_buffer_orphan_kb;
+	*reuses = vgl_buffer_reuses;
+	*spare_kb = vgl_buffer_spare_kb;
+	*copies = vgl_buffer_copies;
+	*copy_kb = vgl_buffer_copy_kb;
+}
+
+// Frees a spare, now if the GPU is done with it, else through the garbage
+// collector
+static void vbo_free_spare(vbo *gpu_buf, int i) {
+	if (vgl_framecount - gpu_buf->spare_frame[i] > FRAME_PURGE_FREQ)
+		vgl_free(gpu_buf->spare_ptr[i]);
+	else
+		mark_as_dirty(gpu_buf->spare_ptr[i]);
+	vgl_buffer_spare_kb -= (gpu_buf->spare_size + 1023) >> 10;
+	gpu_buf->spare_count--;
+	gpu_buf->spare_ptr[i] = gpu_buf->spare_ptr[gpu_buf->spare_count];
+	gpu_buf->spare_frame[i] = gpu_buf->spare_frame[gpu_buf->spare_count];
+}
+
+static void vbo_drop_spares(vbo *gpu_buf) {
+	while (gpu_buf->spare_count)
+		vbo_free_spare(gpu_buf, gpu_buf->spare_count - 1);
+}
+
+// Keeps an allocation the GPU may still read as a spare; false if it can't
+// (spares full), and the caller hands it to the garbage collector
+static GLboolean vbo_keep_spare(vbo *gpu_buf, void *ptr, int32_t size, void *(*alloc_func)(size_t)) {
+	if (gpu_buf->spare_count && (gpu_buf->spare_size != size || gpu_buf->spare_alloc_func != alloc_func))
+		vbo_drop_spares(gpu_buf);
+	if (gpu_buf->spare_count >= VBO_SPARES)
+		return GL_FALSE;
+	gpu_buf->spare_size = size;
+	gpu_buf->spare_alloc_func = alloc_func;
+	gpu_buf->spare_ptr[gpu_buf->spare_count] = ptr;
+	gpu_buf->spare_frame[gpu_buf->spare_count] = vgl_framecount;
+	gpu_buf->spare_count++;
+	vgl_buffer_spare_kb += (size + 1023) >> 10;
+	return GL_TRUE;
+}
+
+// A spare of this size and kind the GPU is done with (the most recently
+// replaced, so the others go idle when fewer are needed), or NULL; frees
+// spares idle for VBO_SPARE_IDLE_FRAMES
+static void *vbo_take_spare(vbo *gpu_buf, int32_t size, void *(*alloc_func)(size_t)) {
+	int best = -1;
+	for (int i = gpu_buf->spare_count - 1; i >= 0; i--) {
+		uint32_t age = vgl_framecount - gpu_buf->spare_frame[i];
+		if (age > VBO_SPARE_IDLE_FRAMES) {
+			vbo_free_spare(gpu_buf, i);
+			if (best == gpu_buf->spare_count)
+				best = i;	// moved into the freed slot
+		} else if (age > FRAME_PURGE_FREQ && gpu_buf->spare_size == size && gpu_buf->spare_alloc_func == alloc_func &&
+			(best < 0 || gpu_buf->spare_frame[i] > gpu_buf->spare_frame[best])) {
+			best = i;
+		}
+	}
+	if (best < 0)
+		return NULL;
+	void *ptr = gpu_buf->spare_ptr[best];
+	vgl_buffer_spare_kb -= (gpu_buf->spare_size + 1023) >> 10;
+	gpu_buf->spare_count--;
+	gpu_buf->spare_ptr[best] = gpu_buf->spare_ptr[gpu_buf->spare_count];
+	gpu_buf->spare_frame[best] = gpu_buf->spare_frame[gpu_buf->spare_count];
+	vgl_buffer_reuses++;
+	return ptr;
 }
 
 inline void glNamedBufferData(GLuint buffer, GLsizei size, const void *data, GLenum usage) {
@@ -371,6 +484,7 @@ inline void glNamedBufferData(GLuint buffer, GLsizei size, const void *data, GLe
 #if defined(HAVE_SCRATCH_MEMORY) && !defined(DISABLE_CIRCULAR_POOL)
 	GLboolean was_scratch = gpu_buf->scratch;
 #endif
+	void *(*old_alloc_func)(size_t) = gpu_buf->alloc_func;
 	switch (usage) {
 	case GL_STREAM_DRAW:
 	case GL_STREAM_COPY:
@@ -402,20 +516,29 @@ inline void glNamedBufferData(GLuint buffer, GLsizei size, const void *data, GLe
 #else
 	if (gpu_buf->ptr) {
 #endif
-		if (gpu_buf->last_frame != OBJ_NOT_USED && (vgl_framecount - gpu_buf->last_frame <= FRAME_PURGE_FREQ)) {
-			mark_as_dirty(gpu_buf->ptr);
+		if (vbo_gpu_may_read(gpu_buf)) {
+			if (!(gpu_buf->last_frame != OBJ_NOT_USED && (vgl_framecount - gpu_buf->last_frame <= FRAME_PURGE_FREQ)))
+				vgl_buffer_early_frees++;
+			if (!vbo_keep_spare(gpu_buf, gpu_buf->ptr, gpu_buf->size, old_alloc_func))
+				mark_as_dirty(gpu_buf->ptr);
+			vgl_buffer_orphans++;
+			vgl_buffer_orphan_kb += (gpu_buf->size + 1023) >> 10;
 		} else {
 			vgl_free(gpu_buf->ptr);
 		}
 	}
 
-	// Allocating a new buffer
+	// Allocating a new buffer (or reusing a spare)
 #if defined(HAVE_SCRATCH_MEMORY) && !defined(DISABLE_CIRCULAR_POOL)
 	if (gpu_buf->scratch)
 		gpu_buf->ptr = vgl_reserve_data_pool(size);
 	else
 #endif
-		gpu_buf->ptr = gpu_buf->alloc_func(size);	
+	{
+		gpu_buf->ptr = vbo_take_spare(gpu_buf, size, gpu_buf->alloc_func);
+		if (!gpu_buf->ptr)
+			gpu_buf->ptr = gpu_buf->alloc_func(size);
+	}
 
 #ifndef SKIP_ERROR_HANDLING
 	if (!gpu_buf->ptr) {
@@ -432,6 +555,7 @@ inline void glNamedBufferData(GLuint buffer, GLsizei size, const void *data, GLe
 
 void glBufferData(GLenum target, GLsizei size, const GLvoid *data, GLenum usage) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glBufferData", 0, target, size, usage, data, 0, 0);
 
 	vbo *gpu_buf;
 	switch (target) {
@@ -449,6 +573,10 @@ void glBufferData(GLenum target, GLsizei size, const GLvoid *data, GLenum usage)
 	}
 	
 	glNamedBufferData((GLuint)gpu_buf, size, data, usage);
+#ifdef VGL_HEAP_CANARIES
+	vgl_heap_canary_check("glBufferData");
+	VGL_HEAP_TRACE("glBufferData", 1, target, size, usage, data, 0, 0);
+#endif
 }
 
 inline void glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, const void *data) {
@@ -495,6 +623,8 @@ inline void glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size
 		if (!gpu_buf->scratch)
 #endif
 			mark_as_dirty(gpu_buf->ptr);
+		vgl_buffer_copies++;
+		vgl_buffer_copy_kb += (gpu_buf->size + 1023) >> 10;
 
 		gpu_buf->ptr = ptr;
 		gpu_buf->last_frame = OBJ_NOT_USED;
@@ -524,6 +654,9 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void
 	}
 	
 	glNamedBufferSubData((GLuint)gpu_buf, offset, size, data);
+#ifdef VGL_HEAP_CANARIES
+	vgl_heap_canary_check("glBufferSubData");
+#endif
 }
 
 inline void *glMapNamedBuffer(GLuint buffer, GLenum access) {

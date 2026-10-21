@@ -41,7 +41,7 @@ char vgl_file_cache_path[256];
 #endif
 #endif
 
-#define MAX_CUSTOM_SHADERS 2048 // Maximum number of linkable custom shaders
+#define MAX_CUSTOM_SHADERS 4096 // Maximum number of linkable custom shaders (HL2 port: 2048 upstream; ToGL creates every dynamic combo of a material)
 #define MAX_CUSTOM_PROGRAMS 1024 // Maximum number of linkable custom programs
 
 #define set_default_attrib_binding() \
@@ -71,7 +71,7 @@ char vgl_file_cache_path[256];
 		if (cur_vao->vertex_attrib_vbo[attr_idx]) { \
 			vbo *gpu_buf = (vbo *)cur_vao->vertex_attrib_vbo[attr_idx]; \
 			ptrs[i] = (uint8_t *)gpu_buf->ptr + cur_vao->vertex_attrib_offsets[attr_idx] + first * streams[i].stride; \
-			gpu_buf->last_frame = vgl_framecount; \
+			gpu_buf->last_frame = gpu_buf->gpu_frame = vgl_framecount; \
 			attributes[i].offset = 0; \
 		} else { \
 			if (count * streams[i].stride > SAFE_DRAW_SIZE_THRESHOLD) { \
@@ -91,7 +91,7 @@ char vgl_file_cache_path[256];
 		if (cur_vao->vertex_attrib_vbo[attr_idx]) { \
 			vbo *gpu_buf = (vbo *)cur_vao->vertex_attrib_vbo[attr_idx]; \
 			ptrs[i] = (uint8_t *)gpu_buf->ptr + cur_vao->vertex_attrib_offsets[attr_idx] + first * streams[i].stride; \
-			gpu_buf->last_frame = vgl_framecount; \
+			gpu_buf->last_frame = gpu_buf->gpu_frame = vgl_framecount; \
 			attributes[i].offset = 0; \
 		} else { \
 			ptrs[i] = gpu_alloc_mapped_temp(count * streams[i].stride); \
@@ -111,7 +111,7 @@ char vgl_file_cache_path[256];
 			if (cur_vao->vertex_attrib_vbo[attr_idx]) { \
 				vbo *gpu_buf = (vbo *)cur_vao->vertex_attrib_vbo[attr_idx]; \
 				ptrs[i] = (uint8_t *)gpu_buf->ptr + cur_vao->vertex_attrib_offsets[attr_idx]; \
-				gpu_buf->last_frame = vgl_framecount; \
+				gpu_buf->last_frame = gpu_buf->gpu_frame = vgl_framecount; \
 				attributes[i].offset = 0; \
 			} else { \
 				ptrs[i] = (void *)cur_vao->vertex_attrib_offsets[attr_idx]; \
@@ -153,7 +153,7 @@ char vgl_file_cache_path[256];
 		while (u) { \
 			ubo *b = u->alias ? u->alias : u; \
 			sceGxmSetVertexUniformBuffer(gxm_context, b->idx, (uint8_t *)ubo_buf[b->bind]->ptr + ubo_offset[b->bind]); \
-			ubo_buf[b->bind]->last_frame = vgl_framecount; \
+			ubo_buf[b->bind]->last_frame = ubo_buf[b->bind]->gpu_frame = vgl_framecount; \
 			u = (ubo *)u->chain; \
 		} \
 	} \
@@ -161,7 +161,7 @@ char vgl_file_cache_path[256];
 		ubo *u = p->frag_ubos; \
 		while (u) { \
 			sceGxmSetFragmentUniformBuffer(gxm_context, u->idx, (uint8_t *)ubo_buf[u->bind]->ptr + ubo_offset[u->bind]); \
-			ubo_buf[u->bind]->last_frame = vgl_framecount; \
+			ubo_buf[u->bind]->last_frame = ubo_buf[u->bind]->gpu_frame = vgl_framecount; \
 			u = (ubo *)u->chain; \
 		} \
 	}
@@ -204,7 +204,7 @@ char vgl_file_cache_path[256];
 		while (u) { \
 			ubo *b = u->alias ? u->alias : u; \
 			sceGxmSetVertexUniformBuffer(gxm_context, b->idx, (uint8_t *)ubo_buf[b->bind]->ptr + ubo_offset[b->bind]); \
-			ubo_buf[b->bind]->last_frame = vgl_framecount; \
+			ubo_buf[b->bind]->last_frame = ubo_buf[b->bind]->gpu_frame = vgl_framecount; \
 			u = (ubo *)u->chain; \
 		} \
 	} \
@@ -212,7 +212,7 @@ char vgl_file_cache_path[256];
 		ubo *u = p->frag_ubos; \
 		while (u) { \
 			sceGxmSetFragmentUniformBuffer(gxm_context, u->idx, (uint8_t *)ubo_buf[u->bind]->ptr + ubo_offset[u->bind]); \
-			ubo_buf[u->bind]->last_frame = vgl_framecount; \
+			ubo_buf[u->bind]->last_frame = ubo_buf[u->bind]->gpu_frame = vgl_framecount; \
 			u = (ubo *)u->chain; \
 		} \
 	}
@@ -270,7 +270,8 @@ typedef struct {
 #ifdef STRICT_UNIFORMS_COMPLIANCE
 typedef union {
 	struct {
-		uint32_t offset : 12;
+		uint32_t offset : 11;
+		uint32_t valid : 1; // keeps the location non-zero: 0 means "no uniform" to glUniform*
 		uint32_t program_idx : 10;
 		uint32_t uniform_idx : 8;
 		uint32_t is_vertex : 1;
@@ -657,12 +658,18 @@ static inline __attribute__((always_inline)) void compile_shader(shader *s, GLbo
 #endif
 	shark_clear_output();
 #ifdef HAVE_SHADER_CACHE
-	SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
-	size_t sz;
-	void *buf = serialize_shader(NULL, &sz, s, save_bindings);
-	sceIoWrite(f, buf, sz);
-	sceIoClose(f);
-	vgl_free(buf);
+	// Only successful compiles are cached: serializing a failed one (no
+	// program) would crash, and caching it would make the failure permanent
+	if (s->prog) {
+		SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
+		if (f >= 0) {
+			size_t sz;
+			void *buf = serialize_shader(NULL, &sz, s, save_bindings);
+			sceIoWrite(f, buf, sz);
+			sceIoClose(f);
+			vgl_free(buf);
+		}
+	}
 #endif
 }
 
@@ -830,7 +837,7 @@ void _glMultiDrawArrays_CustomShadersIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
 	if (is_packed) {
 		if (target_vbo) {
 			ptrs[0] = (void *)target_vbo->ptr + lowest * streams[0].stride;
-			target_vbo->last_frame = vgl_framecount;
+			target_vbo->last_frame = target_vbo->gpu_frame = vgl_framecount;
 			for (int i = 0; i < p->attr_num; i++) {
 				uint8_t attr_idx = p->attr_map[i];
 				attributes[i].regIndex = p->attr[attr_idx].regIndex;
@@ -1057,7 +1064,7 @@ GLboolean _glDrawArrays_CustomShadersIMPL(GLint first, GLsizei count, GLboolean 
 	if (is_packed) {
 		if (target_vbo) {
 			ptrs[0] = (void *)target_vbo->ptr + first * streams[0].stride;
-			target_vbo->last_frame = vgl_framecount;
+			target_vbo->last_frame = target_vbo->gpu_frame = vgl_framecount;
 			for (int i = 0; i < p->attr_num; i++) {
 				uint8_t attr_idx = p->attr_map[i];
 				attributes[i].regIndex = p->attr[attr_idx].regIndex;
@@ -1332,7 +1339,7 @@ GLboolean _glDrawElements_CustomShadersIMPL(uint16_t *idx_buf, GLsizei count, ui
 	if (is_packed) {
 		if (target_vbo) {
 			ptrs[0] = (void *)target_vbo->ptr;
-			target_vbo->last_frame = vgl_framecount;
+			target_vbo->last_frame = target_vbo->gpu_frame = vgl_framecount;
 			for (int i = 0; i < p->attr_num; i++) {
 				uint8_t attr_idx = p->attr_map[i];
 				attributes[i].regIndex = p->attr[attr_idx].regIndex;
@@ -1607,6 +1614,9 @@ GLuint glCreateShader(GLenum shaderType) {
 
 void glGetShaderiv(GLuint handle, GLenum pname, GLint *params) {
 	THREAD_SAFE()
+	// HL2 port: handle 0 (glCreateShader/glCreateProgram failed: tables full) indexes [-1]
+	if (!handle)
+		return;
 
 	// Grabbing passed shader
 	shader *s = shaders[handle - 1];
@@ -1687,6 +1697,9 @@ void glGetShaderSource(GLuint handle, GLsizei bufSize, GLsizei *length, GLchar *
 
 void glShaderSource(GLuint handle, GLsizei count, const GLchar *const *string, const GLint *length) {
 	THREAD_SAFE()
+	// HL2 port: handle 0 (glCreateShader/glCreateProgram failed: tables full) indexes [-1]
+	if (!handle)
+		return;
 
 #ifndef SKIP_ERROR_HANDLING
 	if (count < 0 || count > 512) {
@@ -1731,6 +1744,9 @@ void glShaderBinary(GLsizei count, const GLuint *handles, GLenum binaryFormat, c
 
 void glCompileShader(GLuint handle) {
 	THREAD_SAFE()
+	// HL2 port: handle 0 (glCreateShader/glCreateProgram failed: tables full) indexes [-1]
+	if (!handle)
+		return;
 
 	// If vitaShaRK is not enabled, we try to initialize it
 	if (!is_shark_online && !start_shader_compiler()) {
@@ -1760,6 +1776,7 @@ void glCompileShader(GLuint handle) {
 		sceIoClose(f);
 		unserialize_shader(buf, sz, s, GL_FALSE);
 		vgl_free(buf);
+		s->is_glsl = GL_FALSE; // as after translation, when compiled from source
 		return;
 	}
 #endif
@@ -1772,6 +1789,9 @@ void glCompileShader(GLuint handle) {
 
 void glDeleteShader(GLuint shad) {
 	THREAD_SAFE()
+	// HL2 port: handle 0 (glCreateShader/glCreateProgram failed: tables full) indexes [-1]
+	if (!shad)
+		return;
 
 	// Grabbing passed shader
 	shader *s = shaders[shad - 1];
@@ -1786,6 +1806,9 @@ void glDeleteShader(GLuint shad) {
 
 void glAttachShader(GLuint prog, GLuint shad) {
 	THREAD_SAFE()
+	// HL2 port: handle 0 (glCreateShader/glCreateProgram failed: tables full) indexes [-1]
+	if (!prog || !shad)
+		return;
 
 	// Grabbing passed shader and program
 	shader *s = shaders[shad - 1];
@@ -1857,6 +1880,23 @@ void glGetAttachedShaders(GLuint prog, GLsizei maxCount, GLsizei *count, GLuint 
 		shads[*count] = p->fshader->slot + 1;
 		*count = *count + 1;
 	}
+}
+
+// HL2 Vita port: linked/allocated program and shader slots in use, for the
+// launcher's 10 s memory log (limits: MAX_CUSTOM_PROGRAMS, MAX_CUSTOM_SHADERS)
+void vglGetProgramShaderCounts(int *programs, int *shaders_used) {
+	int i, n = 0;
+	for (i = 0; i < MAX_CUSTOM_PROGRAMS; i++) {
+		if (progs[i].status)
+			n++;
+	}
+	*programs = n;
+	n = 0;
+	for (i = 0; i < MAX_CUSTOM_SHADERS; i++) {
+		if (shaders[i])
+			n++;
+	}
+	*shaders_used = n;
 }
 
 GLuint glCreateProgram(void) {
@@ -1974,6 +2014,9 @@ void glProgramBinary(GLuint prog, GLenum binaryFormat, const void *binary, GLsiz
 
 void glDeleteProgram(GLuint prog) {
 	THREAD_SAFE()
+	// HL2 port: handle 0 (glCreateShader/glCreateProgram failed: tables full) indexes [-1]
+	if (!prog)
+		return;
 
 	// Grabbing passed program
 	program *p = &progs[prog - 1];
@@ -2033,6 +2076,9 @@ void glGetProgramInfoLog(GLuint program, GLsizei maxLength, GLsizei *length, GLc
 
 void glGetProgramiv(GLuint progr, GLenum pname, GLint *params) {
 	THREAD_SAFE()
+	// HL2 port: handle 0 (glCreateShader/glCreateProgram failed: tables full) indexes [-1]
+	if (!progr)
+		return;
 
 	// Grabbing passed program
 	program *p = &progs[progr - 1];
@@ -2102,6 +2148,9 @@ void glGetProgramiv(GLuint progr, GLenum pname, GLint *params) {
 
 void glLinkProgram(GLuint progr) {
 	THREAD_SAFE()
+	// HL2 port: handle 0 (glCreateShader/glCreateProgram failed: tables full) indexes [-1]
+	if (!progr)
+		return;
 
 	// Grabbing passed program
 	program *p = &progs[progr - 1];
@@ -2506,6 +2555,7 @@ GLint glGetUniformLocation(GLuint prog, const GLchar *name) {
 		if (j[i].ptr == u) {
 #ifdef STRICT_UNIFORMS_COMPLIANCE			
 			ret.offset = index;
+			ret.valid = 1;
 			ret.zero = 0;
 			ret.program_idx = prog - 1;
 			ret.uniform_idx = i;

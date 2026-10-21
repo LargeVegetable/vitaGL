@@ -44,22 +44,36 @@ extern vglMemType VGL_MEM_MAIN; // Flag for VRAM usage for allocations
 #endif
 
 // Garbage collector related stuffs
-extern void *frame_purge_list[FRAME_PURGE_FREQ][FRAME_PURGE_LIST_SIZE]; // Purge list for internal elements
-extern void *frame_rt_purge_list[FRAME_PURGE_FREQ][FRAME_PURGE_RENDERTARGETS_LIST_SIZE]; // Purge list for rendertargets
+// The purge lists grow on demand (HL2 Vita): a level load marks far more than
+// FRAME_PURGE_LIST_SIZE elements between buffer swaps, and the fixed-size
+// lists were written past their end (into the next frame's list and then the
+// rendertarget list) without any check. Each list keeps a NULL terminator.
+extern void **frame_purge_list[FRAME_PURGE_FREQ]; // Purge list for internal elements
+extern void **frame_rt_purge_list[FRAME_PURGE_FREQ]; // Purge list for rendertargets
+extern int frame_purge_list_size[FRAME_PURGE_FREQ];
+extern int frame_rt_purge_list_size[FRAME_PURGE_FREQ];
 extern int frame_purge_idx; // Index for currently populatable purge list
 extern int frame_elem_purge_idx; // Index for currently populatable purge list element
 extern int frame_rt_purge_idx; // Index for currently populatable purge list rendertarget
+void vgl_purge_lists_init(void);
+void vgl_grow_purge_list(void);
+void vgl_grow_rt_purge_list(void);
 
 // Macro to mark a pointer or a rendertarget as dirty for garbage collection
-#ifdef DEBUG_GC
 #define mark_as_dirty(x) \
-	if (frame_elem_purge_idx >= FRAME_PURGE_LIST_SIZE) { \
-		vgl_log("%s:%d Garbage collector overflow. Consider increasing FRAME_PURGE_LIST_SIZE.\n", __FILE__, __LINE__); \
-	} \
-	frame_purge_list[frame_purge_idx][frame_elem_purge_idx++] = x
-#else
-#define mark_as_dirty(x) frame_purge_list[frame_purge_idx][frame_elem_purge_idx++] = x
-#endif
+	do { \
+		if (frame_elem_purge_idx >= frame_purge_list_size[frame_purge_idx] - 1) \
+			vgl_grow_purge_list(); \
+		if (frame_elem_purge_idx < frame_purge_list_size[frame_purge_idx] - 1) \
+			frame_purge_list[frame_purge_idx][frame_elem_purge_idx++] = (x); \
+	} while (0)
+#define _mark_rt_as_dirty_impl(x) \
+	do { \
+		if (frame_rt_purge_idx >= frame_rt_purge_list_size[frame_purge_idx] - 1) \
+			vgl_grow_rt_purge_list(); \
+		if (frame_rt_purge_idx < frame_rt_purge_list_size[frame_purge_idx] - 1) \
+			frame_rt_purge_list[frame_purge_idx][frame_rt_purge_idx++] = (x); \
+	} while (0)
 #ifdef HAVE_SHARED_RENDERTARGETS
 typedef struct {
 	SceGxmRenderTarget *rt;
@@ -72,26 +86,10 @@ typedef struct {
 #endif
 } render_target;
 void __mark_rt_as_dirty(render_target *rt);
-#ifdef DEBUG_GC
-#define _mark_rt_as_dirty(x) \
-	if (frame_rt_purge_idx >= FRAME_PURGE_RENDERTARGETS_LIST_SIZE) { \
-		vgl_log("%s:%d Garbage collector overflow. Consider increasing FRAME_PURGE_RENDERTARGETS_LIST_SIZE.\n", __FILE__, __LINE__); \
-	} \
-	frame_rt_purge_list[frame_purge_idx][frame_rt_purge_idx++] = x
-#else
-#define _mark_rt_as_dirty(x) frame_rt_purge_list[frame_purge_idx][frame_rt_purge_idx++] = x
-#endif
+#define _mark_rt_as_dirty(x) _mark_rt_as_dirty_impl(x)
 #define mark_rt_as_dirty(x) __mark_rt_as_dirty((render_target *)x)
 #else
-#ifdef DEBUG_GC
-#define mark_rt_as_dirty(x) \
-	if (frame_rt_purge_idx >= FRAME_PURGE_RENDERTARGETS_LIST_SIZE) { \
-		vgl_log("%s:%d Garbage collector overflow. Consider increasing FRAME_PURGE_RENDERTARGETS_LIST_SIZE.\n", __FILE__, __LINE__); \
-	} \
-	frame_rt_purge_list[frame_purge_idx][frame_rt_purge_idx++] = x
-#else
-#define mark_rt_as_dirty(x) frame_rt_purge_list[frame_purge_idx][frame_rt_purge_idx++] = x
-#endif
+#define mark_rt_as_dirty(x) _mark_rt_as_dirty_impl(x)
 #endif
 
 void vgl_mem_init(size_t size_ram, size_t size_cdram, size_t size_phycont, size_t size_cdlg);

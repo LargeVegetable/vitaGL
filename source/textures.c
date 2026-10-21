@@ -981,8 +981,11 @@ static inline __attribute__((always_inline)) void _glTexSubImage2D(texture *tex,
 #endif
 
 #ifndef TEXTURES_SPEEDHACK
-	// Copying the texture in a new mem location and dirtying old one
-	if (tex->last_frame != OBJ_NOT_USED && (vgl_framecount - tex->last_frame <= FRAME_PURGE_FREQ)) {
+	// Copying the texture in a new mem location and dirtying old one (unless
+	// the app opted out with vglTexInPlaceUpdates: the copy reads the whole
+	// texture back from GPU memory on every update, ~1-3 ms for a 512x256
+	// lightmap page, and a frame in flight seeing new texels early is fine)
+	if (!tex->in_place && tex->last_frame != OBJ_NOT_USED && (vgl_framecount - tex->last_frame <= FRAME_PURGE_FREQ)) {
 		uint32_t size;
 		if (tex->mip_count > 1) {
 			po2_w = nearest_po2(orig_w);
@@ -1241,7 +1244,10 @@ static inline __attribute__((always_inline)) void _glTexSubImage2D(texture *tex,
 			uint8_t *data = (uint8_t *)pixels;
 			uint32_t line_size = width * bpp;
 			uint32_t src_stride = (unpack_row_len ? unpack_row_len : width) * bpp;
-			if (xoffset == 0 && src_stride == mip_w * bpp && src_stride == mip_stride) {
+			// One copy only when the rows are contiguous on both sides: a
+			// narrower rect at x 0 (with the source row length set to the
+			// texture's width) used to land its first row only
+			if (xoffset == 0 && line_size == src_stride && line_size == mip_stride) {
 				vgl_fast_memcpy(ptr, data, line_size * height);
 			} else {
 				for (int i = 0; i < height; i++) {
@@ -1734,6 +1740,7 @@ inline __attribute__((always_inline)) void glGenTextures(GLsizei n, GLuint *res)
 
 			// Resetting texture parameters to their default values
 			texture_slots[i].dirty = GL_FALSE;
+			texture_slots[i].in_place = GL_FALSE;
 #ifndef TEXTURES_SPEEDHACK
 			texture_slots[i].last_frame = OBJ_NOT_USED;
 #endif
@@ -1803,6 +1810,7 @@ void glBindTexture(GLenum target, GLuint texture) {
 
 void glDeleteTextures(GLsizei n, const GLuint *gl_textures) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glDeleteTextures", 0, n, gl_textures ? gl_textures[0] : 0, 0, 0, 0, 0);
 
 #ifndef SKIP_ERROR_HANDLING
 	// Error handling
@@ -1829,7 +1837,7 @@ void glDeleteTextures(GLsizei n, const GLuint *gl_textures) {
 							if (fb->depthbuffer_ptr) {
 								mark_as_dirty(fb->depthbuffer_ptr->depthData);
 								fb->depthbuffer_ptr = NULL;
-								fb->depthbuffer_state = DEPTHBUFFER_MISSING;
+								fb->depthbuffer_state = DEPTHBUFFER_WANTS_STENCIL;
 							}
 							if (fb->target) {
 								mark_rt_as_dirty(fb->target);
@@ -1870,6 +1878,7 @@ void glDeleteTextures(GLsizei n, const GLuint *gl_textures) {
 
 void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *data) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glTexImage2D", 0, target, level, internalFormat, width, height, type);
 
 	// Setting some aliases to make code more readable
 	texture_unit *tex_unit = &texture_units[server_texture_unit];
@@ -1924,6 +1933,10 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
 	default:
 		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, target)
 	}
+#ifdef VGL_HEAP_CANARIES
+	vgl_heap_canary_check("glTexImage2D");
+	VGL_HEAP_TRACE("glTexImage2D", 1, target, level, internalFormat, width, height, type);
+#endif
 }
 
 void glTextureImage2D(GLuint tex_id, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *data) {
@@ -1986,6 +1999,7 @@ void glTextureImage1D(GLuint tex_id, GLint level, GLint internalFormat, GLsizei 
 
 void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {	
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glTexSubImage2D", 0, level, xoffset, yoffset, width, height, format);
 
 	// Setting some aliases to make code more readable
 	texture_unit *tex_unit = &texture_units[server_texture_unit];
@@ -1994,6 +2008,10 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
 	texture *tex = &texture_slots[texture2d_idx];
 	
 	_glTexSubImage2D(tex, target, level, xoffset, yoffset, width, height, format, type, pixels);
+#ifdef VGL_HEAP_CANARIES
+	vgl_heap_canary_check("glTexSubImage2D");
+	VGL_HEAP_TRACE("glTexSubImage2D", 1, level, xoffset, yoffset, width, height, format);
+#endif
 }
 
 void glTextureSubImage2D(GLuint tex_id, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {
@@ -2027,6 +2045,7 @@ void glTextureSubImage1D(GLuint tex_id, GLint level, GLint xoffset, GLsizei widt
 
 void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalFormat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const void *data) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glCompressedTexImage2D", 0, level, internalFormat, width, height, imageSize, target);
 
 	// Setting some aliases to make code more readable
 	texture_unit *tex_unit = &texture_units[server_texture_unit];
@@ -2035,6 +2054,10 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalFormat, G
 	texture *tex = &texture_slots[texture2d_idx];
 	
 	_glCompressedTexImage2D(tex, target, level, internalFormat, width, height, border, imageSize, data);
+#ifdef VGL_HEAP_CANARIES
+	vgl_heap_canary_check("glCompressedTexImage2D");
+	VGL_HEAP_TRACE("glCompressedTexImage2D", 1, level, internalFormat, width, height, imageSize, target);
+#endif
 }
 
 void glCompressedTextureImage2D(GLuint tex_id, GLint level, GLenum internalFormat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const void *data) {
@@ -2178,6 +2201,7 @@ void glActiveTexture(GLenum texture) {
 
 void glGenerateMipmap(GLenum target) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glGenerateMipmap", 0, target, 0, 0, 0, 0, 0);
 
 	// Setting some aliases to make code more readable
 	texture_unit *tex_unit = &texture_units[server_texture_unit];
@@ -2216,6 +2240,10 @@ void glGenerateMipmap(GLenum target) {
 	default:
 		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, target)
 	}
+#ifdef VGL_HEAP_CANARIES
+	vgl_heap_canary_check("glGenerateMipmap");
+	VGL_HEAP_TRACE("glGenerateMipmap", 1, target, 0, 0, 0, 0, 0);
+#endif
 }
 
 void glGenerateTextureMipmap(GLuint target) {
@@ -2253,6 +2281,7 @@ void glGenerateTextureMipmap(GLuint target) {
 
 void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glCopyTexImage2D", 0, level, x, y, width, height, internalformat);
 
 #ifndef SKIP_ERROR_HANDLING
 	// Checking if texture is too big for sceGxm
@@ -2268,6 +2297,10 @@ void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x
 	glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
 	glTexImage2D(target, level, internalformat, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
 	vgl_free(tmp);
+#ifdef VGL_HEAP_CANARIES
+	vgl_heap_canary_check("glCopyTexImage2D");
+	VGL_HEAP_TRACE("glCopyTexImage2D", 1, level, x, y, width, height, internalformat);
+#endif
 }
 
 void glCopyTextureImage2D(GLuint tex_id, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border) {
@@ -2311,6 +2344,7 @@ void glCopyTextureImage1D(GLuint tex_id, GLint level, GLenum internalformat, GLi
 
 void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glCopyTexSubImage2D", 0, level, xoffset, yoffset, width, height, x);
 
 #ifndef SKIP_ERROR_HANDLING
 	// Checking if texture is too big for sceGxm
@@ -2322,6 +2356,10 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
 	glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
 	glTexSubImage2D(target, level, xoffset, yoffset, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
 	vgl_free(tmp);
+#ifdef VGL_HEAP_CANARIES
+	vgl_heap_canary_check("glCopyTexSubImage2D");
+	VGL_HEAP_TRACE("glCopyTexSubImage2D", 1, level, xoffset, yoffset, width, height, x);
+#endif
 }
 
 void glCopyTextureSubImage2D(GLuint tex_id, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
@@ -2673,6 +2711,13 @@ void glSamplerParameteri(GLuint target, GLenum pname, GLint param) {
 
 void glSamplerParameterf(GLuint sampler, GLenum pname, GLfloat param) {
 	glSamplerParameteri(sampler, pname, param);
+}
+
+void vglTexInPlaceUpdates(GLenum target, GLboolean enable) {
+	texture_unit *tex_unit = &texture_units[server_texture_unit];
+	int texture2d_idx;
+	resolve_tex_target(target, SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, target));
+	texture_slots[texture2d_idx].in_place = enable;
 }
 
 void *vglGetTexDataPointer(GLenum target) {

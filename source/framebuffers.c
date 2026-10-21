@@ -213,7 +213,11 @@ inline __attribute__((always_inline)) void glGenFramebuffers(GLsizei n, GLuint *
 		if (!framebuffers[i].active) {
 			ids[j++] = (GLuint)&framebuffers[i];
 			framebuffers[i].active = GL_TRUE;
-			framebuffers[i].depthbuffer_state = DEPTHBUFFER_MISSING;
+			// HL2 Vita: always give the hidden depth buffer a stencil buffer.
+			// Depth/stencil textures (how ToGL attaches them) aren't
+			// supported, so the app's stencil request never reaches here, and
+			// stencil tests against a missing buffer drop pixels
+			framebuffers[i].depthbuffer_state = DEPTHBUFFER_WANTS_STENCIL;
 			framebuffers[i].depthbuffer_ptr = NULL;
 			framebuffers[i].target = NULL;
 			framebuffers[i].tex = NULL;
@@ -251,6 +255,7 @@ void glGenRenderbuffers(GLsizei n, GLuint *ids) {
 
 void glDeleteFramebuffers(GLsizei n, const GLuint *ids) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glDeleteFramebuffers", 0, n, ids ? ids[0] : 0, 0, 0, 0, 0);
 
 #ifndef SKIP_ERROR_HANDLING
 	if (n < 0) {
@@ -494,6 +499,7 @@ inline void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum text
 
 inline void glNamedFramebufferTexture2D(GLuint target, GLenum attachment, GLenum textarget, GLuint tex_id, GLint level) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glNamedFramebufferTexture2D", 0, target, attachment, textarget, tex_id, level, 0);
 
 	framebuffer *fb = (framebuffer *)target;
 
@@ -581,6 +587,7 @@ void glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLe
 
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *data) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glReadPixels", 0, x, y, width, height, format, type);
 
 	/*
 	 * Callbacks are actually used to just perform down/up-sampling
@@ -810,17 +817,19 @@ void vglReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum forma
 
 void glBlitNamedFramebuffer(GLuint readFramebuffer, GLuint drawFramebuffer, GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("glBlitNamedFramebuffer", 0, readFramebuffer, drawFramebuffer, srcX1, srcY1, dstX1, dstY1);
+
+	// Only color blits are implemented. Check before rebinding: returning
+	// with the draw framebuffer swapped sent all later rendering to the blit
+	// destination (ToGL blits depth/stencil when copying depth surfaces).
+	// Depth and stencil bits are dropped from mixed masks.
+	if (!(mask & GL_COLOR_BUFFER_BIT)) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_OPERATION, mask)
+	}
 
 	// Invalidate current write framebuffer binding
 	framebuffer *real_write_fb = active_write_fb;
 	active_write_fb = (framebuffer *)drawFramebuffer;
-	
-	switch (mask) {
-	case GL_COLOR_BUFFER_BIT:
-		break;
-	default:
-		SET_GL_ERROR_WITH_VALUE(GL_INVALID_OPERATION, mask)
-	}
 
 	scene_reset();
 

@@ -21,7 +21,16 @@
  * Utilities for memory management
  */
 
+#include <malloc.h>
 #include "../shared.h"
+
+// HL2 Vita debugging: with VGL_HEAP_CANARIES, the public allocators below are
+// wrappers (see the end of this file) and these are the real implementations
+#ifdef VGL_HEAP_CANARIES
+#define VGL_RAW(name) name##_raw
+#else
+#define VGL_RAW(name) name
+#endif
 
 GLboolean has_cached_mem = GL_FALSE; // Flag for whether to use cached memory for mempools or not
 
@@ -666,17 +675,37 @@ size_t vgl_malloc_usable_size(void *ptr) {
 #endif
 }
 
-void vgl_free(void *ptr) {
+// Bytes vitaGL holds in the newlib heap (its own objects, and GPU data that
+// spilled out of its mempools), reported through vglMemExternalInUse
+static size_t external_in_use = 0;
+
+static inline void *external_track(void *ptr) {
+	if (ptr)
+		__atomic_add_fetch(&external_in_use, malloc_usable_size(ptr), __ATOMIC_RELAXED);
+	return ptr;
+}
+
+static inline void external_untrack(void *ptr) {
+	__atomic_sub_fetch(&external_in_use, malloc_usable_size(ptr), __ATOMIC_RELAXED);
+}
+
+size_t vglMemExternalInUse(void) {
+	return __atomic_load_n(&external_in_use, __ATOMIC_RELAXED);
+}
+
+void VGL_RAW(vgl_free)(void *ptr) {
 	if (!ptr)
 		return;
 
 	vglMemType type = vgl_mem_get_type_by_addr(ptr);
-	if (type == VGL_MEM_EXTERNAL)
+	if (type == VGL_MEM_EXTERNAL) {
+		external_untrack(ptr);
 #ifdef HAVE_WRAPPED_ALLOCATORS
 		__real_free(ptr);
 #else
 		free(ptr);
 #endif
+	}
 #ifdef PHYCONT_ON_DEMAND
 	else if (type == VGL_MEM_PHYCONT) {
 		sceGxmUnmapMemory(ptr);
@@ -694,12 +723,12 @@ void vgl_free(void *ptr) {
 #endif
 }
 
-void *vgl_malloc(size_t size, vglMemType type) {
+void *VGL_RAW(vgl_malloc)(size_t size, vglMemType type) {
 	if (type == VGL_MEM_EXTERNAL)
 #ifdef HAVE_WRAPPED_ALLOCATORS
-		return __real_malloc(size);
+		return external_track(__real_malloc(size));
 #else
-		return malloc(size);
+		return external_track(malloc(size));
 #endif
 #ifdef PHYCONT_ON_DEMAND
 	else if (type == VGL_MEM_PHYCONT)
@@ -715,12 +744,12 @@ void *vgl_malloc(size_t size, vglMemType type) {
 	return NULL;
 }
 
-void *vgl_calloc(size_t num, size_t size, vglMemType type) {
+void *VGL_RAW(vgl_calloc)(size_t num, size_t size, vglMemType type) {
 	if (type == VGL_MEM_EXTERNAL)
 #ifdef HAVE_WRAPPED_ALLOCATORS
-		return __real_calloc(num, size);
+		return external_track(__real_calloc(num, size));
 #else
-		return calloc(num, size);
+		return external_track(calloc(num, size));
 #endif
 #ifdef PHYCONT_ON_DEMAND
 	else if (type == VGL_MEM_PHYCONT) {
@@ -746,12 +775,12 @@ void *vgl_calloc(size_t num, size_t size, vglMemType type) {
 	return NULL;
 }
 
-void *vgl_memalign(size_t alignment, size_t size, vglMemType type) {
+void *VGL_RAW(vgl_memalign)(size_t alignment, size_t size, vglMemType type) {
 	if (type == VGL_MEM_EXTERNAL)
 #ifdef HAVE_WRAPPED_ALLOCATORS
-		return __real_memalign(alignment, size);
+		return external_track(__real_memalign(alignment, size));
 #else
-		return memalign(alignment, size);
+		return external_track(memalign(alignment, size));
 #endif
 #ifdef PHYCONT_ON_DEMAND
 	else if (type == VGL_MEM_PHYCONT)
@@ -767,21 +796,27 @@ void *vgl_memalign(size_t alignment, size_t size, vglMemType type) {
 	return NULL;
 }
 
-void *vgl_realloc(void *ptr, size_t size) {
+void *VGL_RAW(vgl_realloc)(void *ptr, size_t size) {
 	if (!ptr) {
 #ifdef HAVE_WRAPPED_ALLOCATORS
-		return __real_malloc(size);
+		return external_track(__real_malloc(size));
 #else
-		return malloc(size);
+		return external_track(malloc(size));
 #endif
 	}
 	vglMemType type = vgl_mem_get_type_by_addr(ptr);
 	if (type == VGL_MEM_EXTERNAL) {
+		size_t old_size = malloc_usable_size(ptr);
 #ifdef HAVE_WRAPPED_ALLOCATORS
-		return __real_realloc(ptr, size);
+		void *res = __real_realloc(ptr, size);
 #else
-		return realloc(ptr, size);
+		void *res = realloc(ptr, size);
 #endif
+		if (res) {
+			__atomic_sub_fetch(&external_in_use, old_size, __ATOMIC_RELAXED);
+			external_track(res);
+		}
+		return res;
 	}
 #ifdef PHYCONT_ON_DEMAND
 	if (type == VGL_MEM_PHYCONT) {
@@ -803,3 +838,265 @@ void *vgl_realloc(void *ptr, size_t size) {
 	return heap_realloc(type, ptr, size);
 #endif
 }
+
+
+#ifdef VGL_HEAP_CANARIES
+/*
+ * Heap overflow detector (HL2 Vita debugging). Every allocation from vitaGL's
+ * own heaps gets a guard pattern past its end and is recorded; after each
+ * upload-type GL call, vgl_heap_canary_check() verifies all guards and logs
+ * the first one found broken, with the call it was detected after.
+ */
+#define CANARY_SIZE 16
+#define CANARY_BYTE 0xC5
+#define CANARY_SLOTS 32768 // power of two
+
+typedef struct {
+	uint8_t *ptr;
+	uint32_t size;
+} canary_entry;
+
+static canary_entry canary_table[CANARY_SLOTS];
+static uint32_t canary_count = 0;
+static GLboolean canary_reported = GL_FALSE;
+static SceKernelLwMutexWork canary_mutex;
+static GLboolean canary_mutex_ready = GL_FALSE;
+static GLboolean canary_table_full = GL_FALSE; // untracked blocks exist, so bad-free reports would be unreliable
+static uint32_t bad_free_reports = 0;
+
+// launcher_vita/so_loader.cpp, when linked into the HL2 Vita launcher
+extern void so_log_backtrace(const char *tag) __attribute__((weak));
+
+static void canary_lock(void) {
+	if (!canary_mutex_ready) {
+		sceKernelCreateLwMutex(&canary_mutex, "vgl_canary", 2, 0, NULL);
+		canary_mutex_ready = GL_TRUE;
+	}
+	sceKernelLockLwMutex(&canary_mutex, 1, NULL);
+}
+
+static void canary_unlock(void) {
+	sceKernelUnlockLwMutex(&canary_mutex, 1);
+}
+
+static inline uint32_t canary_hash(void *ptr) {
+	return (((uintptr_t)ptr >> 3) * 2654435761u) & (CANARY_SLOTS - 1);
+}
+
+static GLboolean canary_intact(canary_entry *e) {
+	for (int i = 0; i < CANARY_SIZE; i++) {
+		if (e->ptr[e->size + i] != CANARY_BYTE)
+			return GL_FALSE;
+	}
+	return GL_TRUE;
+}
+
+static void canary_report(canary_entry *e, const char *where) {
+	if (canary_reported)
+		return;
+	canary_reported = GL_TRUE;
+	int first = 0;
+	while (first < CANARY_SIZE && e->ptr[e->size + first] == CANARY_BYTE)
+		first++;
+	vgl_log("HEAP OVERFLOW detected after %s: block %p of %u bytes (type %d) overwritten at +%u: %02X %02X %02X %02X\n",
+		where, e->ptr, e->size, vgl_mem_get_type_by_addr(e->ptr), e->size + first,
+		e->ptr[e->size], e->ptr[e->size + 1], e->ptr[e->size + 2], e->ptr[e->size + 3]);
+}
+
+static void canary_add(void *ptr, size_t size) {
+	if (!ptr)
+		return;
+	sceClibMemset((uint8_t *)ptr + size, CANARY_BYTE, CANARY_SIZE);
+	canary_lock();
+	if (canary_count >= CANARY_SLOTS - 1) {
+		canary_table_full = GL_TRUE;
+	} else {
+		uint32_t i = canary_hash(ptr);
+		while (canary_table[i].ptr)
+			i = (i + 1) & (CANARY_SLOTS - 1);
+		canary_table[i].ptr = (uint8_t *)ptr;
+		canary_table[i].size = size;
+		canary_count++;
+	}
+	canary_unlock();
+}
+
+// Removes the entry for ptr, checking its guard first; returns GL_FALSE if
+// ptr isn't a live block (double free, or not the start of a block)
+static GLboolean canary_remove(void *ptr, const char *where) {
+	GLboolean found = GL_FALSE;
+	canary_lock();
+	uint32_t i = canary_hash(ptr);
+	while (canary_table[i].ptr) {
+		if (canary_table[i].ptr == ptr) {
+			if (!canary_intact(&canary_table[i]))
+				canary_report(&canary_table[i], where);
+			// backward-shift deletion keeps linear probing chains intact
+			uint32_t j = i;
+			for (;;) {
+				j = (j + 1) & (CANARY_SLOTS - 1);
+				if (!canary_table[j].ptr)
+					break;
+				uint32_t k = canary_hash(canary_table[j].ptr);
+				if ((j > i && (k <= i || k > j)) || (j < i && (k <= i && k > j))) {
+					canary_table[i] = canary_table[j];
+					i = j;
+				}
+			}
+			canary_table[i].ptr = NULL;
+			canary_count--;
+			found = GL_TRUE;
+			break;
+		}
+		i = (i + 1) & (CANARY_SLOTS - 1);
+	}
+	canary_unlock();
+	return found || canary_table_full;
+}
+
+static void bad_free_report(void *ptr, const char *where) {
+	if (bad_free_reports >= 16)
+		return;
+	bad_free_reports++;
+	vgl_log("BAD FREE in %s: %p (type %d) is not a live block (double free or interior pointer); not freed\n",
+		where, ptr, vgl_mem_get_type_by_addr(ptr));
+	if (so_log_backtrace)
+		so_log_backtrace("vitaGL bad free");
+}
+
+// Heap statistics that no longer add up mean the heap's metadata is corrupt;
+// returns the corrupt pool, or -1
+static int mspace_corrupt_pool(void) {
+#ifndef HAVE_CUSTOM_HEAP
+	for (int i = 0; i < VGL_MEM_EXTERNAL; i++) {
+		if (!mempool_mspace[i])
+			continue;
+		SceClibMspaceStats stats;
+		sceClibMspaceMallocStats(mempool_mspace[i], &stats);
+		if (stats.current_in_use > stats.capacity || stats.capacity > mempool_size[i])
+			return i;
+	}
+#endif
+	return -1;
+}
+
+static void mspace_sanity_check(const char *where) {
+	static GLboolean reported = GL_FALSE;
+	if (reported)
+		return;
+	int pool = mspace_corrupt_pool();
+	if (pool >= 0) {
+		reported = GL_TRUE;
+		vgl_log("HEAP CORRUPT detected after %s: pool %d\n", where, pool);
+	}
+}
+
+// Brackets the GL call that corrupts a heap: every traced call checks the
+// heap, the last clean check is remembered, and the first corrupt one is
+// logged together with it
+typedef struct {
+	const char *where;
+	int after;
+	int args[6];
+} heap_trace_point;
+
+static heap_trace_point heap_last_clean;
+
+static void heap_trace_format(char *buf, size_t len, const heap_trace_point *p) {
+	if (!p->where) {
+		snprintf(buf, len, "(none)");
+		return;
+	}
+	snprintf(buf, len, "%s %s(%d, %d, %d, %d, %d, %d)", p->after ? "after" : "before", p->where,
+		p->args[0], p->args[1], p->args[2], p->args[3], p->args[4], p->args[5]);
+}
+
+void vgl_heap_trace(const char *where, int after, int a, int b, int c, int d, int e, int f) {
+	static GLboolean reported = GL_FALSE;
+	if (reported)
+		return;
+	heap_trace_point p = {where, after, {a, b, c, d, e, f}};
+	int pool = mspace_corrupt_pool();
+	if (pool < 0) {
+		heap_last_clean = p;
+		return;
+	}
+	reported = GL_TRUE;
+	char now[192], last[192];
+	heap_trace_format(now, sizeof(now), &p);
+	heap_trace_format(last, sizeof(last), &heap_last_clean);
+	vgl_log("HEAP CORRUPT (pool %d) first seen %s; last clean check was %s\n", pool, now, last);
+	if (so_log_backtrace)
+		so_log_backtrace("vitaGL heap corrupt");
+}
+
+void vgl_heap_canary_check(const char *where) {
+	// A full scan after every upload made level loads very slow; scan on
+	// buffer swaps and every 64th upload (reports may then lag the culprit)
+	static uint32_t calls = 0;
+	if (strcmp(where, "vglSwapBuffers") != 0 && (++calls & 63) != 0)
+		return;
+	mspace_sanity_check(where);
+	if (canary_reported)
+		return;
+	canary_lock();
+	for (uint32_t i = 0; i < CANARY_SLOTS; i++) {
+		if (canary_table[i].ptr && !canary_intact(&canary_table[i])) {
+			canary_report(&canary_table[i], where);
+			break;
+		}
+	}
+	canary_unlock();
+}
+
+static inline GLboolean canary_type(vglMemType type) {
+	return type != VGL_MEM_EXTERNAL
+#ifdef PHYCONT_ON_DEMAND
+		&& type != VGL_MEM_PHYCONT
+#endif
+		;
+}
+
+void vgl_free(void *ptr) {
+	if (ptr && canary_type(vgl_mem_get_type_by_addr(ptr)) && !canary_remove(ptr, "free")) {
+		// freeing it again would corrupt the heap
+		bad_free_report(ptr, "vgl_free");
+		return;
+	}
+	vgl_free_raw(ptr);
+}
+
+void *vgl_malloc(size_t size, vglMemType type) {
+	if (!canary_type(type))
+		return vgl_malloc_raw(size, type);
+	void *res = vgl_malloc_raw(size + CANARY_SIZE, type);
+	canary_add(res, size);
+	return res;
+}
+
+void *vgl_calloc(size_t num, size_t size, vglMemType type) {
+	if (!canary_type(type))
+		return vgl_calloc_raw(num, size, type);
+	void *res = vgl_calloc_raw(1, num * size + CANARY_SIZE, type);
+	canary_add(res, num * size);
+	return res;
+}
+
+void *vgl_memalign(size_t alignment, size_t size, vglMemType type) {
+	if (!canary_type(type))
+		return vgl_memalign_raw(alignment, size, type);
+	void *res = vgl_memalign_raw(alignment, size + CANARY_SIZE, type);
+	canary_add(res, size);
+	return res;
+}
+
+void *vgl_realloc(void *ptr, size_t size) {
+	if (!ptr || !canary_type(vgl_mem_get_type_by_addr(ptr)))
+		return vgl_realloc_raw(ptr, size);
+	if (!canary_remove(ptr, "realloc"))
+		bad_free_report(ptr, "vgl_realloc");
+	void *res = vgl_realloc_raw(ptr, size + CANARY_SIZE);
+	canary_add(res, size);
+	return res;
+}
+#endif

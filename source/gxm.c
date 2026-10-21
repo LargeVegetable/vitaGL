@@ -103,8 +103,12 @@ float *legacy_pool_end = NULL; // Address of the end of the GL1 immediate draw p
 #endif
 uint32_t vgl_framecount = 0; // Current frame number since application started
 
-void *frame_purge_list[FRAME_PURGE_FREQ][FRAME_PURGE_LIST_SIZE]; // Purge list for internal elements
-void *frame_rt_purge_list[FRAME_PURGE_FREQ][FRAME_PURGE_RENDERTARGETS_LIST_SIZE]; // Purge list for rendertargets
+static void *frame_purge_storage[FRAME_PURGE_FREQ][FRAME_PURGE_LIST_SIZE]; // Initial storage of the purge lists
+static void *frame_rt_purge_storage[FRAME_PURGE_FREQ][FRAME_PURGE_RENDERTARGETS_LIST_SIZE];
+void **frame_purge_list[FRAME_PURGE_FREQ]; // Purge list for internal elements
+void **frame_rt_purge_list[FRAME_PURGE_FREQ]; // Purge list for rendertargets
+int frame_purge_list_size[FRAME_PURGE_FREQ];
+int frame_rt_purge_list_size[FRAME_PURGE_FREQ];
 int frame_purge_idx = 0; // Index for currently populatable purge list
 int frame_elem_purge_idx = 0; // Index for currently populatable purge list element
 int frame_rt_purge_idx = 0; // Index for currently populatable purge list rendertarget
@@ -163,7 +167,11 @@ static inline __attribute__((always_inline)) int setup_render_target(SceGxmRende
 
 #ifdef HAVE_SHARED_RENDERTARGETS
 #define MAX_RENDER_TARGETS_NUM 47 // Maximum amount of dedicated render targets usable for fbos
-#define MAX_SHARED_RT_SIZE 256 // Maximum  width value in pixels for shared rendertargets usage
+// HL2 Vita: raised from 256 so screen-sized framebuffers share render targets
+// too. Source recreates all its render textures on a material reload, before
+// any frame lets deleted framebuffers' render targets be collected, and the
+// full-screen ones ran sceGxm out of render targets.
+#define MAX_SHARED_RT_SIZE 1024 // Maximum  width value in pixels for shared rendertargets usage
 render_target rt_list[MAX_RENDER_TARGETS_NUM];
 
 render_target *get_free_render_target(int w, int h) {
@@ -265,6 +273,41 @@ static void display_queue_callback(const void *callbackData) {
 		sceDisplayWaitVblankStartMulti(vsync_interval);
 }
 
+void vgl_purge_lists_init(void) {
+	for (int i = 0; i < FRAME_PURGE_FREQ; i++) {
+		frame_purge_list[i] = frame_purge_storage[i];
+		frame_purge_list_size[i] = FRAME_PURGE_LIST_SIZE;
+		frame_purge_list[i][0] = NULL;
+		frame_rt_purge_list[i] = frame_rt_purge_storage[i];
+		frame_rt_purge_list_size[i] = FRAME_PURGE_RENDERTARGETS_LIST_SIZE;
+		frame_rt_purge_list[i][0] = NULL;
+	}
+}
+
+// Doubles a purge list, keeping its contents; on failure the list is left
+// as is and the caller drops the element (a leak, rather than an overflow)
+static void **grow_purge_list(void **list, int *size, void *initial_storage) {
+	int new_size = *size * 2;
+	void **res = (void **)calloc(new_size, sizeof(void *));
+	if (!res) {
+		vgl_log("%s:%d Garbage collector list of %d elements could not grow; leaking.\n", __FILE__, __LINE__, *size);
+		return list;
+	}
+	sceClibMemcpy(res, list, *size * sizeof(void *));
+	if ((void *)list != initial_storage)
+		free(list);
+	*size = new_size;
+	return res;
+}
+
+void vgl_grow_purge_list(void) {
+	frame_purge_list[frame_purge_idx] = grow_purge_list(frame_purge_list[frame_purge_idx], &frame_purge_list_size[frame_purge_idx], frame_purge_storage[frame_purge_idx]);
+}
+
+void vgl_grow_rt_purge_list(void) {
+	frame_rt_purge_list[frame_purge_idx] = grow_purge_list(frame_rt_purge_list[frame_purge_idx], &frame_rt_purge_list_size[frame_purge_idx], frame_rt_purge_storage[frame_purge_idx]);
+}
+
 // Garbage collector
 #if defined(HAVE_PTHREAD) && !defined(HAVE_SINGLE_THREADED_GC)
 void garbage_collector(void *arg) {
@@ -277,14 +320,14 @@ int garbage_collector(unsigned int args, void *arg) {
 		sceKernelWaitSema(gc_mutex[0], 1, NULL);
 #endif
 		// Purging all elements marked for deletion
-		for (int i = 0; i < FRAME_PURGE_LIST_SIZE; i++) {
+		for (int i = 0; i < frame_purge_list_size[frame_purge_clean_idx]; i++) {
 			if (frame_purge_list[frame_purge_clean_idx][i]) {
 				vgl_free(frame_purge_list[frame_purge_clean_idx][i]);
 				frame_purge_list[frame_purge_clean_idx][i] = NULL;
 			} else
 				break;
 		}
-		for (int i = 0; i < FRAME_PURGE_RENDERTARGETS_LIST_SIZE; i++) {
+		for (int i = 0; i < frame_rt_purge_list_size[frame_purge_clean_idx]; i++) {
 			if (frame_rt_purge_list[frame_purge_clean_idx][i]) {
 				sceGxmDestroyRenderTarget(frame_rt_purge_list[frame_purge_clean_idx][i]);
 				frame_rt_purge_list[frame_purge_clean_idx][i] = NULL;
@@ -748,6 +791,7 @@ void vglSetDisplayBufferCount(int count) {
 
 void vglSwapBuffers(GLboolean has_commondialog) {
 	THREAD_SAFE()
+	VGL_HEAP_TRACE("vglSwapBuffers", 0, has_commondialog, 0, 0, 0, 0, 0);
 
 #ifndef SKIP_SPLASHSCREEN
 	// Ignore display swaps during splashscreen since we handle them in the splashscreen thread
@@ -965,6 +1009,10 @@ void vglSwapBuffers(GLboolean has_commondialog) {
 	sceKernelWaitSema(gc_mutex[1], 1, NULL);
 	sceKernelSignalSema(gc_mutex[0], 1);
 #endif
+#ifdef VGL_HEAP_CANARIES
+	vgl_heap_canary_check("vglSwapBuffers");
+	VGL_HEAP_TRACE("vglSwapBuffers", 1, has_commondialog, 0, 0, 0, 0, 0);
+#endif
 }
 
 void glFinish(void) {
@@ -994,6 +1042,15 @@ void glFlush(void) {
 
 void vglSetDisplayCallback(void (*cb)(void *framebuf)) {
 	vgl_display_cb = cb;
+}
+
+// HL2 port: shader patcher memory in use (bytes), for the memory log; the
+// pools are shader_patcher_*_size each and nothing is freed until a shader is
+void vglGetShaderPatcherUsage(uint32_t *buffer_used, uint32_t *vertex_usse_used, uint32_t *fragment_usse_used, uint32_t *pool_size) {
+	*buffer_used = gxm_shader_patcher ? sceGxmShaderPatcherGetBufferMemAllocated(gxm_shader_patcher) : 0;
+	*vertex_usse_used = gxm_shader_patcher ? sceGxmShaderPatcherGetVertexUsseMemAllocated(gxm_shader_patcher) : 0;
+	*fragment_usse_used = gxm_shader_patcher ? sceGxmShaderPatcherGetFragmentUsseMemAllocated(gxm_shader_patcher) : 0;
+	*pool_size = shader_patcher_buffer_size;
 }
 
 void vglSetupShaderPatcher(uint32_t buffer_mem_size, uint32_t vertex_usse_mem_size, uint32_t fragment_usse_mem_size) {

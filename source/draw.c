@@ -30,7 +30,7 @@ GLboolean prim_is_non_native = GL_FALSE; // Flag for when a primitive not suppor
 	type_t *ptr; \
 	if (gpu_buf != NULL && !prim_is_non_native) { \
 		ptr = src; \
-		gpu_buf->last_frame = vgl_framecount; \
+		gpu_buf->last_frame = gpu_buf->gpu_frame = vgl_framecount; \
 	} else { \
 		switch (mode) { \
 		case GL_QUADS: \
@@ -74,7 +74,7 @@ GLboolean prim_is_non_native = GL_FALSE; // Flag for when a primitive not suppor
 	type_t *ptr; \
 	if (gpu_buf != NULL && !prim_is_non_native) { \
 		ptr = src; \
-		gpu_buf->last_frame = vgl_framecount; \
+		gpu_buf->last_frame = gpu_buf->gpu_frame = vgl_framecount; \
 	} else { \
 		switch (mode) { \
 		case GL_QUADS: \

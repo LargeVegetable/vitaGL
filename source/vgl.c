@@ -130,6 +130,11 @@ static uint8_t *circular_data_pool_limit;
 #endif
 uint32_t circular_data_pool_size = CIRCULAR_POOL_SIZE_DEF;
 uint8_t *vgl_reserve_data_pool(uint32_t size) {
+	// Keep the bump pointer aligned: an odd-sized reservation (e.g. an odd
+	// count of 16-bit indices) otherwise misaligns every later one, and the
+	// next float/VFP store into the pool (in GPU memory, which faults on
+	// unaligned access) crashes, as glBlitNamedFramebuffer's vertex data did
+	size = VGL_ALIGN(size, 8);
 #ifndef CIRCULAR_POOL_SPEEDHACK
 	uint8_t *res = circular_data_pool_ptr[vgl_circular_idx];
 	circular_data_pool_ptr[vgl_circular_idx] += size;
@@ -457,10 +462,7 @@ GLboolean vglInitWithCustomSizes(int pool_size, int width, int height, int ram_p
 	}
 
 	// Init purge lists
-	for (int i = 0; i < FRAME_PURGE_FREQ; i++) {
-		frame_purge_list[i][0] = NULL;
-		frame_rt_purge_list[i][0] = NULL;
-	}
+	vgl_purge_lists_init();
 
 	// Init scissor test state
 	reset_scissor_test_region();

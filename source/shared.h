@@ -206,6 +206,7 @@ typedef struct texture {
 	GLboolean use_mips;
 	GLboolean dirty;
 	GLboolean overridden;
+	GLboolean in_place; // vglTexInPlaceUpdates: sub-image updates write into the live data, no copy
 	SceGxmTexture gxm_tex;
 	void *data;
 	void *palette_data;
@@ -663,16 +664,37 @@ typedef enum {
 } texenv_op_mode;
 #endif
 
+// HL2 port: allocations a buffer replaced while the GPU could still read them
+// (glBufferData on a buffer drawn in the last FRAME_PURGE_FREQ frames) are
+// kept by the buffer and reused once the GPU is done with them, instead of
+// going to the garbage collector and being allocated anew each time. ToGL
+// replaces its dynamic vertex buffer (1.5 MB) and index buffer (64 KB) every
+// time they fill up. Spares idle this many frames are freed
+#define VBO_SPARES 6
+#define VBO_SPARE_IDLE_FRAMES 600
+
 // VBO struct
 typedef struct {
 	void *ptr;
 	int32_t size;
 	void *(*alloc_func)(size_t);
 	uint32_t last_frame;
+	// HL2 port: the frame a draw last used the buffer. last_frame is also
+	// reset by writes (so glBufferSubData after a map writes in place), which
+	// let glBufferData free memory right after an unmap while the GPU could
+	// still read it from the last frames; frees go by this instead
+	uint32_t gpu_frame;
 #if defined(HAVE_SCRATCH_MEMORY) && !defined(DISABLE_CIRCULAR_POOL)
 	GLboolean scratch;
 #endif
 	GLboolean mapped;
+	// spares: all of spare_size bytes from spare_alloc_func, each with the
+	// frame it was replaced in
+	void *spare_ptr[VBO_SPARES];
+	uint32_t spare_frame[VBO_SPARES];
+	int32_t spare_size;
+	void *(*spare_alloc_func)(size_t);
+	int spare_count;
 } vbo;
 
 // VAO struct
@@ -1207,6 +1229,13 @@ void init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface
 void init_display_depth_stencil_surfaces(void); // Creates depth and stencil surfaces for the display
 void start_shader_patcher(void); // Creates a shader patcher instance
 void scene_reset(void); // Resets drawing scene if required
+#ifdef VGL_HEAP_CANARIES
+void vgl_heap_canary_check(const char *where); // utils/mem_utils.c
+void vgl_heap_trace(const char *where, int after, int a, int b, int c, int d, int e, int f); // utils/mem_utils.c
+#define VGL_HEAP_TRACE(where, after, a, b, c, d, e, f) vgl_heap_trace(where, after, (int)(a), (int)(b), (int)(c), (int)(d), (int)(e), (int)(f))
+#else
+#define VGL_HEAP_TRACE(where, after, a, b, c, d, e, f)
+#endif
 GLboolean start_shader_compiler(void); // Starts a shader compiler instance
 
 /* framebuffers.c */
