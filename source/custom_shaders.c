@@ -662,6 +662,18 @@ static inline __attribute__((always_inline)) void compile_shader(shader *s, GLbo
 	// program) would crash, and caching it would make the failure permanent
 	if (s->prog) {
 		SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
+		if (f < 0) {
+			// HL2 port: the hash subfolder doesn't exist yet (vgl.c no longer
+			// creates all 512 at init): create it and try once more
+			char dir[256];
+			snprintf(dir, sizeof(dir), "%s", cache_fname);
+			char *slash = strrchr(dir, '/');
+			if (slash) {
+				*slash = 0;
+				sceIoMkdir(dir, 0777);
+				f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
+			}
+		}
 		if (f >= 0) {
 			size_t sz;
 			void *buf = serialize_shader(NULL, &sz, s, save_bindings);
