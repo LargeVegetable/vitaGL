@@ -576,6 +576,32 @@ void *serialize_shader(void *out, size_t *sz, shader *s, GLboolean save_bindings
 	return _out;
 }
 
+// HL2 port: whether a cache file holds a whole shader as serialize_shader
+// wrote it (no bindings): the header's counts fit and a GXP program of its
+// own stated size follows. A cut short one crashed unserialize_shader
+static GLboolean cache_file_valid(const uint8_t *buf, size_t sz) {
+	if (sz < sizeof(uint32_t))
+		return GL_FALSE;
+	uint32_t matrix_uniforms_num;
+	vgl_fast_memcpy(&matrix_uniforms_num, buf, sizeof(uint32_t));
+	if (matrix_uniforms_num > 4096)
+		return GL_FALSE;
+	size_t off = sizeof(uint32_t) * ((size_t)matrix_uniforms_num + 1);
+#ifdef HAVE_GLSL_TEXTURE_SIZE
+	if (off + 1 > sz)
+		return GL_FALSE;
+	off += 1 + sizeof(glsl_samplers_info) * buf[off];
+#endif
+	if (off > sz || sz - off < 16)
+		return GL_FALSE;
+	const uint8_t *prog = buf + off;
+	if (prog[0] != 'G' || prog[1] != 'X' || prog[2] != 'P' || prog[3] != 0)
+		return GL_FALSE;
+	uint32_t prog_size;
+	vgl_fast_memcpy(&prog_size, prog + 8, sizeof(uint32_t));
+	return (prog_size >= 16 && prog_size <= sz - off) ? GL_TRUE : GL_FALSE;
+}
+
 void unserialize_shader(void *in, size_t sz, shader *s, GLboolean load_bindings) {
 	uint8_t *buf = (uint8_t *)in;
 	uint32_t matrix_uniforms_num;
@@ -661,7 +687,12 @@ static inline __attribute__((always_inline)) void compile_shader(shader *s, GLbo
 	// Only successful compiles are cached: serializing a failed one (no
 	// program) would crash, and caching it would make the failure permanent
 	if (s->prog) {
-		SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
+		// HL2 port: written to a .tmp file and renamed into place, so an app
+		// closed mid-write (the long PREPARE SHADERS run) can't leave a cut
+		// short file that a later compile of the shader reads
+		char tmp_fname[260];
+		snprintf(tmp_fname, sizeof(tmp_fname), "%s.tmp", cache_fname);
+		SceUID f = sceIoOpen(tmp_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
 		if (f < 0) {
 			// HL2 port: the hash subfolder doesn't exist yet (vgl.c no longer
 			// creates all 512 at init): create it and try once more
@@ -671,15 +702,20 @@ static inline __attribute__((always_inline)) void compile_shader(shader *s, GLbo
 			if (slash) {
 				*slash = 0;
 				sceIoMkdir(dir, 0777);
-				f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
+				f = sceIoOpen(tmp_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
 			}
 		}
 		if (f >= 0) {
 			size_t sz;
 			void *buf = serialize_shader(NULL, &sz, s, save_bindings);
-			sceIoWrite(f, buf, sz);
+			const int written = sceIoWrite(f, buf, sz);
 			sceIoClose(f);
 			vgl_free(buf);
+			if (written == (int)sz) {
+				sceIoRemove(cache_fname);
+				sceIoRename(tmp_fname, cache_fname);
+			} else
+				sceIoRemove(tmp_fname);
 		}
 	}
 #endif
@@ -1779,17 +1815,24 @@ void glCompileShader(GLuint handle) {
 	sprintf(fname, "%s/%s/%02X/%llX.gxp", vgl_shader_cache_path, s->type == GL_VERTEX_SHADER ? "v" : "f", subdir_hash, hash);
 	SceUID f = sceIoOpen(fname, SCE_O_RDONLY, 0777);
 	if (f >= 0) {
-		vgl_free(s->source);
-		s->source = NULL;
-		size_t sz = sceIoLseek(f, 0, SCE_SEEK_END);
+		const SceOff end = sceIoLseek(f, 0, SCE_SEEK_END);
 		sceIoLseek(f, 0, SCE_SEEK_SET);
-		void *buf = vglMalloc(sz);
-		sceIoRead(f, buf, sz);
+		const size_t sz = end > 0 ? (size_t)end : 0;
+		void *buf = sz ? vglMalloc(sz) : NULL;
+		const int got = buf ? sceIoRead(f, buf, sz) : -1;
 		sceIoClose(f);
-		unserialize_shader(buf, sz, s, GL_FALSE);
-		vgl_free(buf);
-		s->is_glsl = GL_FALSE; // as after translation, when compiled from source
-		return;
+		// HL2 port: a damaged file is deleted and the shader compiled again
+		if (buf && got == (int)sz && cache_file_valid((const uint8_t *)buf, sz)) {
+			vgl_free(s->source);
+			s->source = NULL;
+			unserialize_shader(buf, sz, s, GL_FALSE);
+			vgl_free(buf);
+			s->is_glsl = GL_FALSE; // as after translation, when compiled from source
+			return;
+		}
+		if (buf)
+			vgl_free(buf);
+		sceIoRemove(fname);
 	}
 #endif
 
