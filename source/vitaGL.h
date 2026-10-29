@@ -418,6 +418,9 @@ extern "C" {
 #define GL_DOT3_RGBA                                    0x86AF
 #define GL_PROGRAM_BINARY_LENGTH                        0x8741
 #define GL_MIRROR_CLAMP_EXT                             0x8742
+#define GL_TEXTURE_SRGB_DECODE_EXT                      0x8A48
+#define GL_DECODE_EXT                                   0x8A49
+#define GL_SKIP_DECODE_EXT                              0x8A4A
 #define GL_BUFFER_SIZE                                  0x8764
 #define GL_ATC_RGBA_INTERPOLATED_ALPHA_AMD              0x87EE
 #define GL_NUM_PROGRAM_BINARY_FORMATS                   0x87FE

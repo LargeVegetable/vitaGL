@@ -763,6 +763,8 @@ void _glMultiDrawArrays_CustomShadersIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
 				vglSetTexVMode(&tex->gxm_tex, smp->v_mode);
 				vglSetTexMipmapCount(&tex->gxm_tex, smp->use_mips ? tex->mip_count : 0);
 				vglSetTexLodBias(&tex->gxm_tex, smp->lod_bias);
+				if (tex->srgb)
+					vglSetTexGammaMode(&tex->gxm_tex, smp->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 				tex->overridden = GL_TRUE;
 			} else if (tex->overridden) {
 				vglSetTexMinFilter(&tex->gxm_tex, tex->min_filter);
@@ -772,6 +774,8 @@ void _glMultiDrawArrays_CustomShadersIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
 				vglSetTexVMode(&tex->gxm_tex, tex->v_mode);
 				vglSetTexMipmapCount(&tex->gxm_tex, tex->use_mips ? tex->mip_count : 0);
 				vglSetTexLodBias(&tex->gxm_tex, tex->lod_bias);
+				if (tex->srgb)
+					vglSetTexGammaMode(&tex->gxm_tex, tex->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 				tex->overridden = GL_FALSE;
 			}
 			sceGxmSetFragmentTexture(gxm_context, i, &tex->gxm_tex);
@@ -809,6 +813,8 @@ void _glMultiDrawArrays_CustomShadersIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
 				vglSetTexUMode(&tex->gxm_tex, smp->u_mode);
 				vglSetTexVMode(&tex->gxm_tex, smp->v_mode);
 				vglSetTexMipmapCount(&tex->gxm_tex, smp->use_mips ? tex->mip_count : 0);
+				if (tex->srgb)
+					vglSetTexGammaMode(&tex->gxm_tex, smp->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 				tex->overridden = GL_TRUE;
 			} else if (tex->overridden) {
 				vglSetTexMinFilter(&tex->gxm_tex, tex->min_filter);
@@ -817,6 +823,8 @@ void _glMultiDrawArrays_CustomShadersIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
 				vglSetTexUMode(&tex->gxm_tex, tex->u_mode);
 				vglSetTexVMode(&tex->gxm_tex, tex->v_mode);
 				vglSetTexMipmapCount(&tex->gxm_tex, tex->use_mips ? tex->mip_count : 0);
+				if (tex->srgb)
+					vglSetTexGammaMode(&tex->gxm_tex, tex->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 				tex->overridden = GL_FALSE;
 			}
 			sceGxmSetVertexTexture(gxm_context, i, &tex->gxm_tex);
@@ -982,6 +990,8 @@ GLboolean _glDrawArrays_CustomShadersIMPL(GLint first, GLsizei count, GLboolean 
 				vglSetTexVMode(&tex->gxm_tex, smp->v_mode);
 				vglSetTexMipmapCount(&tex->gxm_tex, smp->use_mips ? tex->mip_count : 0);
 				vglSetTexLodBias(&tex->gxm_tex, smp->lod_bias);
+				if (tex->srgb)
+					vglSetTexGammaMode(&tex->gxm_tex, smp->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 				tex->overridden = GL_TRUE;
 			} else if (tex->overridden) {
 				vglSetTexMinFilter(&tex->gxm_tex, tex->min_filter);
@@ -991,6 +1001,8 @@ GLboolean _glDrawArrays_CustomShadersIMPL(GLint first, GLsizei count, GLboolean 
 				vglSetTexVMode(&tex->gxm_tex, tex->v_mode);
 				vglSetTexMipmapCount(&tex->gxm_tex, tex->use_mips ? tex->mip_count : 0);
 				vglSetTexLodBias(&tex->gxm_tex, tex->lod_bias);
+				if (tex->srgb)
+					vglSetTexGammaMode(&tex->gxm_tex, tex->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 				tex->overridden = GL_FALSE;
 			}
 			sceGxmSetFragmentTexture(gxm_context, i, &tex->gxm_tex);
@@ -1028,6 +1040,8 @@ GLboolean _glDrawArrays_CustomShadersIMPL(GLint first, GLsizei count, GLboolean 
 				vglSetTexUMode(&tex->gxm_tex, smp->u_mode);
 				vglSetTexVMode(&tex->gxm_tex, smp->v_mode);
 				vglSetTexMipmapCount(&tex->gxm_tex, smp->use_mips ? tex->mip_count : 0);
+				if (tex->srgb)
+					vglSetTexGammaMode(&tex->gxm_tex, smp->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 				tex->overridden = GL_TRUE;
 			} else if (tex->overridden) {
 				vglSetTexMinFilter(&tex->gxm_tex, tex->min_filter);
@@ -1036,6 +1050,8 @@ GLboolean _glDrawArrays_CustomShadersIMPL(GLint first, GLsizei count, GLboolean 
 				vglSetTexUMode(&tex->gxm_tex, tex->u_mode);
 				vglSetTexVMode(&tex->gxm_tex, tex->v_mode);
 				vglSetTexMipmapCount(&tex->gxm_tex, tex->use_mips ? tex->mip_count : 0);
+				if (tex->srgb)
+					vglSetTexGammaMode(&tex->gxm_tex, tex->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 				tex->overridden = GL_FALSE;
 			}
 			sceGxmSetVertexTexture(gxm_context, i, &tex->gxm_tex);
@@ -1231,6 +1247,8 @@ GLboolean _glDrawElements_CustomShadersIMPL(uint16_t *idx_buf, GLsizei count, ui
 				vglSetTexVMode(&tex->gxm_tex, smp->v_mode);
 				vglSetTexMipmapCount(&tex->gxm_tex, smp->use_mips ? tex->mip_count : 0);
 				vglSetTexLodBias(&tex->gxm_tex, smp->lod_bias);
+				if (tex->srgb)
+					vglSetTexGammaMode(&tex->gxm_tex, smp->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 				tex->overridden = GL_TRUE;
 			} else if (tex->overridden) {
 				vglSetTexMinFilter(&tex->gxm_tex, tex->min_filter);
@@ -1240,6 +1258,8 @@ GLboolean _glDrawElements_CustomShadersIMPL(uint16_t *idx_buf, GLsizei count, ui
 				vglSetTexVMode(&tex->gxm_tex, tex->v_mode);
 				vglSetTexMipmapCount(&tex->gxm_tex, tex->use_mips ? tex->mip_count : 0);
 				vglSetTexLodBias(&tex->gxm_tex, tex->lod_bias);
+				if (tex->srgb)
+					vglSetTexGammaMode(&tex->gxm_tex, tex->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 				tex->overridden = GL_FALSE;
 			}
 			sceGxmSetFragmentTexture(gxm_context, i, &tex->gxm_tex);
@@ -1277,6 +1297,8 @@ GLboolean _glDrawElements_CustomShadersIMPL(uint16_t *idx_buf, GLsizei count, ui
 				vglSetTexUMode(&tex->gxm_tex, smp->u_mode);
 				vglSetTexVMode(&tex->gxm_tex, smp->v_mode);
 				vglSetTexMipmapCount(&tex->gxm_tex, smp->use_mips ? tex->mip_count : 0);
+				if (tex->srgb)
+					vglSetTexGammaMode(&tex->gxm_tex, smp->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 				tex->overridden = GL_TRUE;
 			} else if (tex->overridden) {
 				vglSetTexMinFilter(&tex->gxm_tex, tex->min_filter);
@@ -1285,6 +1307,8 @@ GLboolean _glDrawElements_CustomShadersIMPL(uint16_t *idx_buf, GLsizei count, ui
 				vglSetTexUMode(&tex->gxm_tex, tex->u_mode);
 				vglSetTexVMode(&tex->gxm_tex, tex->v_mode);
 				vglSetTexMipmapCount(&tex->gxm_tex, tex->use_mips ? tex->mip_count : 0);
+				if (tex->srgb)
+					vglSetTexGammaMode(&tex->gxm_tex, tex->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 				tex->overridden = GL_FALSE;
 			}
 			sceGxmSetVertexTexture(gxm_context, i, &tex->gxm_tex);
