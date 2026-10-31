@@ -370,6 +370,11 @@ void gpu_alloc_cube_texture(uint32_t w, uint32_t h, SceGxmTextureFormat format, 
 			void *mapped_data = gpu_alloc_mapped_temp(tex_size);
 			vgl_fast_memcpy(mapped_data, data, tex_size);
 			SceGxmTransferFormat dst_fmt = tex_format_to_transfer(format);
+			// HL2 port: S8S8S8S8 (the engine's normalization cubes) has no transfer
+			// format in tex_format_to_transfer (gpu_utils.h); the bytes are copied
+			// as they are, so any 32-bit one places them
+			if (dst_fmt == (SceGxmTransferFormat)0xFFFFFFFF && bpp == 4)
+				dst_fmt = SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR;
 			sceGxmTransferCopy(
 				w, h, 0, 0, SCE_GXM_TRANSFER_COLORKEY_NONE,
 				src_format, SCE_GXM_TRANSFER_LINEAR,
@@ -381,11 +386,9 @@ void gpu_alloc_cube_texture(uint32_t w, uint32_t h, SceGxmTextureFormat format, 
 			vgl_memset(texture_data, 0, face_size);
 
 		// Initializing texture and validating it
-		// One level: only level 0 of each face is stored. The init and
-		// vglSetTexMipmapCount write (count - 1) & 0xF, so 0 meant 16 levels
-		// and sampling at a distance read past the faces (rainbow/noise
-		// reflections in the HL2 port)
-		tex->mip_count = 1;
+		// HL2 port: no mip chain (0), which tells the GPU the faces follow
+		// each other directly, as stored here; see vglSetTexMipmapCount
+		tex->mip_count = 0;
 		vglInitCubeTexture(&tex->gxm_tex, base_texture_data, format, w, h, tex->mip_count);
 		tex->palette_data = NULL;
 		tex->status = TEX_VALID;
@@ -609,7 +612,14 @@ void gpu_alloc_compressed_cube_texture(uint32_t w, uint32_t h, SceGxmTextureForm
 				case SCE_GXM_TEXTURE_FORMAT_UBC2_ABGR:
 				case SCE_GXM_TEXTURE_FORMAT_UBC3_ABGR:
 				case SCE_GXM_TEXTURE_FORMAT_UBC5_GR:
+					// HL2 port: 128-bit blocks (DXT3/DXT5) take the CPU swizzler, as in
+					// gpu_alloc_compressed_texture: through the RAW128 sceGxmTransferCopy,
+					// 2D DXT5 textures came out black or with garbage blocks
+#ifdef HL2_DXT5_TRANSFER
 					if (aligned_width == w && aligned_height == h && h <= 2048 && w <= 2048 && w >= 4 && h >= 4) {
+#else
+					if (0) {
+#endif
 #ifdef TEXTURE_UPLOADS_SPEEDHACK
 						void *mapped_src = data;
 #else
@@ -662,11 +672,9 @@ void gpu_alloc_compressed_cube_texture(uint32_t w, uint32_t h, SceGxmTextureForm
 			vgl_memset(mip_data, 0, mip_size);
 
 		// Initializing texture and validating it
-		// One level: only level 0 of each face is stored. The init and
-		// vglSetTexMipmapCount write (count - 1) & 0xF, so 0 meant 16 levels
-		// and sampling at a distance read past the faces (rainbow/noise
-		// reflections in the HL2 port)
-		tex->mip_count = 1;
+		// HL2 port: no mip chain (0), which tells the GPU the faces follow
+		// each other directly, as stored here; see vglSetTexMipmapCount
+		tex->mip_count = 0;
 		vglInitCubeTexture(&tex->gxm_tex, base_texture_data, format, w, h, tex->mip_count);
 		tex->palette_data = NULL;
 		tex->status = TEX_VALID;

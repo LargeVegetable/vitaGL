@@ -530,6 +530,30 @@ static inline __attribute__((always_inline)) void _glTexImage2D_CubeIMPL(texture
 			data_bpp = 2;
 			src_format = SCE_GXM_TRANSFER_FORMAT_U4U4U4U4_ABGR;
 			break;
+		case GL_HALF_FLOAT:
+		case GL_HALF_FLOAT_OES:
+			// HL2 port: the engine's normalization cubes are RGBA16F under ToGL
+			// (texturemanager.cpp); rejecting them left those samplers on an empty
+			// descriptor. Stored as S8S8S8S8 (converted below): the values are
+			// within [-1, 1] (unit vector components), so signed bytes hold them
+			// in half the memory of F16
+			data_bpp = 8;
+			src_format = SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR;
+			break;
+		default:
+			SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, type)
+		}
+		break;
+	case GL_BGRA:
+		// HL2 port: uncompressed A8R8G8B8/X8R8G8B8 cubes (ToGL passes GL_BGRA
+		// through on the Vita, as for 2D textures): the 32-bit texels are copied
+		// as they are and sampled as ARGB, like the 2D path's GL_BGRA
+		switch (type) {
+		case GL_UNSIGNED_BYTE:
+		case GL_UNSIGNED_INT_8_8_8_8_REV:
+			data_bpp = 4;
+			src_format = SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR;
+			break;
 		default:
 			SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, type)
 		}
@@ -541,6 +565,13 @@ static inline __attribute__((always_inline)) void _glTexImage2D_CubeIMPL(texture
 
 	// Detecting  texture format
 	switch (internalFormat) {
+	case GL_RGBA16F:
+		// HL2 port: only half-float sources (see above)
+		if (data_bpp != 8) {
+			SET_GL_ERROR_WITH_VALUE(GL_INVALID_OPERATION, type)
+		}
+		tex_format = SCE_GXM_TEXTURE_FORMAT_S8S8S8S8_ABGR;
+		break;
 	case GL_SRGB:
 	case GL_SRGB8:
 		gamma_correction = GL_TRUE;
@@ -569,11 +600,38 @@ static inline __attribute__((always_inline)) void _glTexImage2D_CubeIMPL(texture
 		tex_format = SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR;
 		break;
 	}
+	// HL2 port: half floats become signed bytes in R,G,B,A order (S8S8S8S8_ABGR,
+	// as GL_RGBA bytes are U8U8U8U8_ABGR), clamped to [-1, 1], whatever other
+	// internal format is asked for
+	uint8_t *s8_data = NULL;
+	if (data_bpp == 8) {
+		tex_format = SCE_GXM_TEXTURE_FORMAT_S8S8S8S8_ABGR;
+		data_bpp = 4;
+		if (data && level == 0) {
+			const __fp16 *src = (const __fp16 *)data;
+			const int count = width * height * 4;
+			s8_data = (uint8_t *)vglMalloc(count);
+			if (s8_data) {
+				for (int i = 0; i < count; i++) {
+					float v = (float)src[i];
+					v = v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v);
+					s8_data[i] = (uint8_t)(int8_t)(v * 127.0f + (v < 0.0f ? -0.5f : 0.5f));
+				}
+			}
+			data = s8_data;
+		}
+	}
+	// and BGRA sources keep their byte order (B,G,R,A in memory), whatever the
+	// internal format (GL_RGB8 for X8R8G8B8 would otherwise mean 24-bit texels)
+	else if (format == GL_BGRA)
+		tex_format = SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ARGB;
 
 	// Allocating texture/mipmaps depending on user call
 	tex->format = src_format;
 	if (level == 0) // FIXME: Add proper mipmaps support
 		gpu_alloc_cube_texture(width, height, tex_format, src_format, data, tex, data_bpp, index);
+	if (s8_data)
+		vgl_free(s8_data);
 
 	// Setting texture parameters
 	vglSetTexUMode(&tex->gxm_tex, SCE_GXM_TEXTURE_ADDR_CLAMP);

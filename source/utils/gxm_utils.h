@@ -123,9 +123,12 @@ static inline __attribute__((always_inline)) void vglSetTexLodBias(SceGxmTexture
 static inline __attribute__((always_inline)) void vglSetTexMipmapCount(SceGxmTexture *texture, uint32_t count) {
 	SceGxmTextureInternal *tex = (SceGxmTextureInternal *)texture;
 	// HL2 port: callers pass 0 for "no mipmaps" (use_mips ? mip_count : 0),
-	// and (0 - 1) & 0xF is 15, i.e. 16 levels: minified textures with only
-	// level 0 stored sampled memory past their data. 0 means one level
-	if (count == 0)
+	// which writes 15. 2D textures get one level (1, field 0) instead. Cubes
+	// keep 15, "no mip chain": with any other value the GPU lays the faces
+	// out as if every mip level were stored and pads them to 2 KB (Vita3K
+	// renderer/src/texture/cache.cpp), while the cube allocators pack level 0
+	// of each face back to back; reflections read misplaced faces
+	if (count == 0 && (tex->control_words[1] & 0xE0000000) != SCE_GXM_TEXTURE_CUBE)
 		count = 1;
 	tex->control_words[0] = tex->control_words[0] & 0xFFE1FFFF | (((count - 1) & 0xF) << 17);
 }
@@ -148,8 +151,7 @@ static inline __attribute__((always_inline)) void vglInitLinearTexture(SceGxmTex
 }
 static inline __attribute__((always_inline)) void vglInitCubeTexture(SceGxmTexture *texture, const void *data, SceGxmTextureFormat texFormat, unsigned int width, unsigned int height, unsigned int mipCount) {
 	SceGxmTextureInternal *tex = (SceGxmTextureInternal *)texture;
-	if (mipCount == 0) // see vglSetTexMipmapCount
-		mipCount = 1;
+	// HL2 port: 0 stays "no mip chain" for cubes, see vglSetTexMipmapCount
 	tex->control_words[0] = ((mipCount - 1) & 0xF) << 17 | 0x3E00090 | texFormat & 0x80000000;
 	tex->control_words[1] = (31 - __builtin_clz(height)) | 0x40000000 | ((31 - __builtin_clz(width)) << 16) | texFormat & 0x1F000000;
 	tex->control_words[2] = (uint32_t)data & 0xFFFFFFFC;
