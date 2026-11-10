@@ -959,6 +959,7 @@ void vglTexImageDepthBuffer(GLenum target) {
 			sceGxmTextureInitLinear(&tex->gxm_tex, gxm_depth_stencil_surface.depthData, SCE_GXM_TEXTURE_FORMAT_DF32M, DISPLAY_WIDTH, DISPLAY_HEIGHT, 0);
 		}
 		tex->status = TEX_VALID;
+		tex->srgb = GL_FALSE; // a DF32M view now: no gamma mode to set
 	} break;
 	default:
 		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, target)

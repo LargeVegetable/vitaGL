@@ -207,6 +207,8 @@ typedef struct texture {
 	GLboolean dirty;
 	GLboolean overridden;
 	GLboolean in_place; // vglTexInPlaceUpdates: sub-image updates write into the live data, no copy
+	GLboolean srgb; // sRGB internal format: sampled with gamma decode unless a sampler skips it
+	GLboolean skip_srgb_decode; // GL_TEXTURE_SRGB_DECODE_EXT = GL_SKIP_DECODE_EXT (no sampler bound)
 	SceGxmTexture gxm_tex;
 	void *data;
 	void *palette_data;
@@ -630,6 +632,7 @@ typedef struct {
 	SceGxmTextureAddrMode v_mode;
 	SceGxmTextureMipFilter mip_filter;
 	GLboolean use_mips;
+	GLboolean skip_srgb_decode; // GL_TEXTURE_SRGB_DECODE_EXT = GL_SKIP_DECODE_EXT
 	uint32_t lod_bias;
 } sampler;
 

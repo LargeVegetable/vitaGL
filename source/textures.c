@@ -342,6 +342,20 @@ static inline __attribute__((always_inline)) void _glTexParameteri(texture *tex,
 			if (tex->status == TEX_VALID)
 				vglSetTexMagFilter(&tex->gxm_tex, tex->mag_filter);
 			break;
+		case GL_TEXTURE_SRGB_DECODE_EXT: // sRGB textures read raw (skip) or linearized (decode)
+			switch (param) {
+			case GL_DECODE_EXT:
+				tex->skip_srgb_decode = GL_FALSE;
+				break;
+			case GL_SKIP_DECODE_EXT:
+				tex->skip_srgb_decode = GL_TRUE;
+				break;
+			default:
+				SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, param)
+			}
+			if (tex->status == TEX_VALID && tex->srgb)
+				vglSetTexGammaMode(&tex->gxm_tex, tex->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
+			break;
 		default:
 			SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, pname)
 		}
@@ -459,6 +473,20 @@ static inline __attribute__((always_inline)) void _glTexParameteri(texture *tex,
 			tex->lod_bias = (uint32_t)(param + GL_MAX_TEXTURE_LOD_BIAS);
 			if (tex->status == TEX_VALID)
 				vglSetTexLodBias(&tex->gxm_tex, tex->lod_bias);
+			break;
+		case GL_TEXTURE_SRGB_DECODE_EXT: // sRGB textures read raw (skip) or linearized (decode)
+			switch (param) {
+			case GL_DECODE_EXT:
+				tex->skip_srgb_decode = GL_FALSE;
+				break;
+			case GL_SKIP_DECODE_EXT:
+				tex->skip_srgb_decode = GL_TRUE;
+				break;
+			default:
+				SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, param)
+			}
+			if (tex->status == TEX_VALID && tex->srgb)
+				vglSetTexGammaMode(&tex->gxm_tex, tex->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 			break;
 		default:
 			SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, pname)
@@ -641,7 +669,8 @@ static inline __attribute__((always_inline)) void _glTexImage2D_CubeIMPL(texture
 	vglSetTexMipFilter(&tex->gxm_tex, tex->mip_filter);
 	vglSetTexLodBias(&tex->gxm_tex, tex->lod_bias);
 	vglSetTexMipmapCount(&tex->gxm_tex, tex->use_mips ? tex->mip_count : 0);
-	if (gamma_correction)
+	tex->srgb = gamma_correction;
+	if (gamma_correction && !tex->skip_srgb_decode)
 		vglSetTexGammaMode(&tex->gxm_tex, SCE_GXM_TEXTURE_GAMMA_BGR);
 }
 
@@ -992,7 +1021,8 @@ static inline __attribute__((always_inline)) void _glTexImage2D_FlatIMPL(texture
 	vglSetTexMipFilter(&tex->gxm_tex, tex->mip_filter);
 	vglSetTexLodBias(&tex->gxm_tex, tex->lod_bias);
 	vglSetTexMipmapCount(&tex->gxm_tex, tex->use_mips ? tex->mip_count : 0);
-	if (gamma_correction)
+	tex->srgb = gamma_correction;
+	if (gamma_correction && !tex->skip_srgb_decode)
 		vglSetTexGammaMode(&tex->gxm_tex, SCE_GXM_TEXTURE_GAMMA_BGR);
 
 	// Setting palette if the format requests one
@@ -1751,7 +1781,8 @@ void _glCompressedTexImage2D(texture *tex, GLenum target, GLint level, GLenum in
 		vglSetTexMipFilter(&tex->gxm_tex, tex->mip_filter);
 		vglSetTexLodBias(&tex->gxm_tex, tex->lod_bias);
 		vglSetTexMipmapCount(&tex->gxm_tex, tex->use_mips ? tex->mip_count : 1);
-		if (gamma_correction)
+		tex->srgb = gamma_correction;
+		if (gamma_correction && !tex->skip_srgb_decode)
 			vglSetTexGammaMode(&tex->gxm_tex, SCE_GXM_TEXTURE_GAMMA_BGR);
 		break;
 	default:
@@ -1799,6 +1830,8 @@ inline __attribute__((always_inline)) void glGenTextures(GLsizei n, GLuint *res)
 			// Resetting texture parameters to their default values
 			texture_slots[i].dirty = GL_FALSE;
 			texture_slots[i].in_place = GL_FALSE;
+			texture_slots[i].srgb = GL_FALSE;
+			texture_slots[i].skip_srgb_decode = GL_FALSE;
 #ifndef TEXTURES_SPEEDHACK
 			texture_slots[i].last_frame = OBJ_NOT_USED;
 #endif
@@ -2293,6 +2326,9 @@ void glGenerateMipmap(GLenum target) {
 		vglSetTexMipFilter(&tex->gxm_tex, tex->mip_filter);
 		vglSetTexLodBias(&tex->gxm_tex, tex->lod_bias);
 		vglSetTexMipmapCount(&tex->gxm_tex, tex->use_mips ? tex->mip_count : 0);
+		// gpu_alloc_mipmaps rebuilt the descriptor, without its gamma mode
+		if (tex->srgb)
+			vglSetTexGammaMode(&tex->gxm_tex, tex->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 
 		break;
 	default:
@@ -2335,6 +2371,9 @@ void glGenerateTextureMipmap(GLuint target) {
 	vglSetTexMipFilter(&tex->gxm_tex, tex->mip_filter);
 	vglSetTexLodBias(&tex->gxm_tex, tex->lod_bias);
 	vglSetTexMipmapCount(&tex->gxm_tex, tex->use_mips ? tex->mip_count : 0);
+	// gpu_alloc_mipmaps rebuilt the descriptor, without its gamma mode
+	if (tex->srgb)
+		vglSetTexGammaMode(&tex->gxm_tex, tex->skip_srgb_decode ? SCE_GXM_TEXTURE_GAMMA_NONE : SCE_GXM_TEXTURE_GAMMA_BGR);
 }
 
 void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border) {
@@ -2625,6 +2664,7 @@ void glGenSamplers(GLsizei n, GLuint *smps) {
 		smp->mip_filter = SCE_GXM_TEXTURE_MIP_FILTER_ENABLED;
 		smp->lod_bias = GL_MAX_TEXTURE_LOD_BIAS;
 		smp->use_mips = GL_TRUE;
+		smp->skip_srgb_decode = GL_FALSE;
 		smps[i] = (GLuint)smp;
 	}
 }
@@ -2761,6 +2801,18 @@ void glSamplerParameteri(GLuint target, GLenum pname, GLint param) {
 		break;
 	case GL_TEXTURE_LOD_BIAS: // Distant LOD bias
 		smp->lod_bias = (uint32_t)(param + GL_MAX_TEXTURE_LOD_BIAS);
+		break;
+	case GL_TEXTURE_SRGB_DECODE_EXT: // sRGB textures read raw (skip) or linearized (decode)
+		switch (param) {
+		case GL_DECODE_EXT:
+			smp->skip_srgb_decode = GL_FALSE;
+			break;
+		case GL_SKIP_DECODE_EXT:
+			smp->skip_srgb_decode = GL_TRUE;
+			break;
+		default:
+			SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, param)
+		}
 		break;
 	default:
 		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, pname)
